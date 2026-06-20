@@ -1,3 +1,0 @@
-label,# samples,Average,Min,Max,Error %,Throughput,P90,P95,P99,submit status
-03 Submit Apply (direct),1000,290,88,673,0.00%,96.99 req/s,431,481,547,PENDING
-03 Submit Apply (MQ),1000,2543,317,13704,0.00%,18.10 req/s,4833,6670,9459,MQ_SENT

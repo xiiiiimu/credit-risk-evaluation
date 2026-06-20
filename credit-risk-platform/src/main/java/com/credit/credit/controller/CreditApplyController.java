@@ -11,6 +11,7 @@ import com.credit.credit.service.CreditRecordService;
 import com.credit.agent.service.AgentConversationService;
 import com.credit.common.Result;
 import com.credit.common.context.UserHolder;
+import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.web.bind.annotation.*;
 
@@ -19,6 +20,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/credit/apply")
 public class CreditApplyController {
@@ -39,36 +41,57 @@ public class CreditApplyController {
             @RequestBody CreditApplySubmitRequest request,
             @RequestHeader(value = TraceIdInterceptor.TRACE_HEADER, required = false) String traceId,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyHeader) {
-        if (UserHolder.getUser() == null) {
-            return Result.fail("请先登录");
-        }
-        if (request == null || request.getProductId() == null
-                || request.getApplyAmount() == null
-                || !hasMinimumInput(request)) {
-            return Result.fail("productId、applyAmount 与申请说明不能为空");
-        }
-        Long userId = UserHolder.getUser().getId();
-        String tid = traceId != null ? traceId : MDC.get(TraceIdInterceptor.MDC_KEY);
-        if (tid == null) {
-            tid = UUID.randomUUID().toString().replace("-", "");
-        }
-        String sessionId = agentConversationService.ensureSession(
-                request.getSessionId(), userId, AgentConversationService.SCENE_CREDIT);
+        long totalStart = System.nanoTime();
+        Long taskId = null;
+        String workflowId = null;
+        try {
+            if (UserHolder.getUser() == null) {
+                return Result.fail("请先登录");
+            }
+            if (request == null || request.getProductId() == null
+                    || request.getApplyAmount() == null
+                    || !hasMinimumInput(request)) {
+                return Result.fail("productId、applyAmount 与申请说明不能为空");
+            }
+            Long userId = UserHolder.getUser().getId();
+            String tid = traceId != null ? traceId : MDC.get(TraceIdInterceptor.MDC_KEY);
+            if (tid == null) {
+                tid = UUID.randomUUID().toString().replace("-", "");
+            }
+            long ensureSessionStart = System.nanoTime();
+            String sessionId = agentConversationService.ensureSession(
+                    request.getSessionId(), userId, AgentConversationService.SCENE_CREDIT);
+            log.info("[PERF][submit] stage=ensureSession cost={}ms", elapsedMs(ensureSessionStart));
 
-        String idemKey = request.getIdempotencyKey() != null ? request.getIdempotencyKey() : idempotencyHeader;
-        Long taskId = creditApplyAsyncService.submitAsync(
-                userId,
-                request,
-                sessionId,
-                tid,
-                idemKey);
-        Map<String, Object> data = new HashMap<>();
-        data.put("taskId", taskId);
-        CreditAsyncTask created = creditApplyAsyncService.getTask(taskId, userId);
-        data.put("status", created != null ? created.getStatus() : CreditAsyncTask.PENDING);
-        data.put("workflowId", created != null ? created.getWorkflowId() : null);
-        data.put("pollUrl", "/api/credit/apply/task/" + taskId);
-        return Result.ok(data);
+            String idemKey = request.getIdempotencyKey() != null ? request.getIdempotencyKey() : idempotencyHeader;
+            long submitAsyncStart = System.nanoTime();
+            taskId = creditApplyAsyncService.submitAsync(
+                    userId,
+                    request,
+                    sessionId,
+                    tid,
+                    idemKey);
+            log.info("[PERF][submit] taskId={} stage=submitAsync cost={}ms", taskId, elapsedMs(submitAsyncStart));
+
+            long getTaskStart = System.nanoTime();
+            Map<String, Object> data = new HashMap<>();
+            data.put("taskId", taskId);
+            CreditAsyncTask created = creditApplyAsyncService.getTask(taskId, userId);
+            workflowId = created != null ? created.getWorkflowId() : null;
+            data.put("status", created != null ? created.getStatus() : CreditAsyncTask.PENDING);
+            data.put("workflowId", workflowId);
+            data.put("pollUrl", "/api/credit/apply/task/" + taskId);
+            log.info("[PERF][submit] taskId={} workflowId={} stage=getTaskAndResponseBuild cost={}ms",
+                    taskId, workflowId, elapsedMs(getTaskStart));
+            return Result.ok(data);
+        } finally {
+            log.info("[PERF][submit] taskId={} workflowId={} stage=total cost={}ms",
+                    taskId, workflowId, elapsedMs(totalStart));
+        }
+    }
+
+    private static long elapsedMs(long startNano) {
+        return (System.nanoTime() - startNano) / 1_000_000L;
     }
 
     @GetMapping("/task/{taskId:\\d+}")

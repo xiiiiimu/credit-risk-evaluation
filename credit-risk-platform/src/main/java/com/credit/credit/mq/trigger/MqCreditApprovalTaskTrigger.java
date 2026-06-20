@@ -21,16 +21,36 @@ public class MqCreditApprovalTaskTrigger implements CreditApprovalTaskTrigger {
 
     @Override
     public boolean trigger(CreditAsyncTask task) {
-        boolean sent = creditApprovalTaskProducer.send(task);
-        if (sent) {
-            task.setStatus(CreditAsyncTask.MQ_SENT);
-            task.setErrorMsg(null);
+        long totalStart = System.nanoTime();
+        long updateStart = totalStart;
+        Long taskId = task != null ? task.getId() : null;
+        String workflowId = task != null ? task.getWorkflowId() : null;
+        try {
+            long sendStart = System.nanoTime();
+            boolean sent = creditApprovalTaskProducer.send(task);
+            log.info("[PERF][submit] taskId={} workflowId={} stage=producer.send cost={}ms",
+                    taskId, workflowId, elapsedMs(sendStart));
+
+            updateStart = System.nanoTime();
+            if (sent) {
+                task.setStatus(CreditAsyncTask.MQ_SENT);
+                task.setErrorMsg(null);
+                creditAsyncTaskMapper.updateById(task);
+                return true;
+            }
+            task.setStatus(CreditAsyncTask.MQ_SEND_FAILED);
+            task.setErrorMsg("RocketMQ 消息发送失败");
             creditAsyncTaskMapper.updateById(task);
-            return true;
+            return false;
+        } finally {
+            log.info("[PERF][submit] taskId={} workflowId={} stage=taskUpdate cost={}ms",
+                    taskId, workflowId, elapsedMs(updateStart));
+            log.info("[PERF][submit] taskId={} workflowId={} stage=trigger.total cost={}ms",
+                    taskId, workflowId, elapsedMs(totalStart));
         }
-        task.setStatus(CreditAsyncTask.MQ_SEND_FAILED);
-        task.setErrorMsg("RocketMQ 消息发送失败");
-        creditAsyncTaskMapper.updateById(task);
-        return false;
+    }
+
+    private static long elapsedMs(long startNano) {
+        return (System.nanoTime() - startNano) / 1_000_000L;
     }
 }

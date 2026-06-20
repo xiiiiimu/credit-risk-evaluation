@@ -22,6 +22,11 @@ public class CreditAgentRequest {
     private Long applicationId;
     private Long taskId;
 
+    /** Java Consumer 持锁调用：JAVA_OWNED */
+    private String lockMode;
+    /** 具体锁 token，如 task-{taskId} */
+    private String lockOwner;
+
     private BigDecimal income;
     private String occupation;
     private Integer age;

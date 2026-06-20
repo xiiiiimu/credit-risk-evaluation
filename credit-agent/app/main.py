@@ -1,12 +1,21 @@
 from typing import Any
+import logging
+import time
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings, get_settings
-from app.workflow.graph_runner import run_credit_workflow
+from app.workflow.graph_runner import (
+    LOCK_MODE_JAVA_OWNED,
+    is_java_owned,
+    normalize_lock_mode,
+    run_credit_workflow,
+)
 from app.resilience.agent_health import get_agent_health_registry
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="credit-agent",
@@ -29,6 +38,8 @@ class CreditRequest(BaseModel):
     workflowId: str | None = None
     applicationId: int | None = None
     taskId: int | None = None
+    lockMode: str | None = None
+    lockOwner: str | None = None
 
     income: float | None = None
     occupation: str | None = None
@@ -88,6 +99,13 @@ def _resolve_settings(header_internal_key: str | None = None) -> Settings:
     return base
 
 
+def _resolve_lock_mode(
+    body: CreditRequest,
+    x_workflow_lock_mode: str | None,
+) -> str | None:
+    return normalize_lock_mode(x_workflow_lock_mode) or normalize_lock_mode(body.lockMode)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "credit-agent"}
@@ -108,6 +126,9 @@ def analyze_credit(
     body: CreditRequest,
     x_trace_id: str | None = Header(default=None, alias="X-Trace-Id"),
     x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
+    x_workflow_lock_mode: str | None = Header(default=None, alias="X-Workflow-Lock-Mode"),
+    x_workflow_lock_owner: str | None = Header(default=None, alias="X-Workflow-Lock-Owner"),
+    x_workflow_lock_owner_token: str | None = Header(default=None, alias="X-Workflow-Lock-Owner-Token"),
 ) -> CreditAnalysisResponse:
     settings = _resolve_settings(x_internal_api_key)
     if not settings.openai_api_key:
@@ -116,6 +137,18 @@ def analyze_credit(
     trace_id = body.traceId or x_trace_id
     if not body.workflowId:
         raise HTTPException(status_code=400, detail="workflowId is required")
+
+    lock_mode = _resolve_lock_mode(body, x_workflow_lock_mode)
+    lock_owner = x_workflow_lock_owner_token or body.lockOwner or x_workflow_lock_owner
+    skip_acquire = lock_mode == LOCK_MODE_JAVA_OWNED
+
+    total_start = time.perf_counter()
+    logger.info(
+        "[PERF][agent] workflowId=%s lockMode=%s skipAcquire=%s stage=analyze.start",
+        body.workflowId,
+        lock_mode,
+        skip_acquire,
+    )
 
     initial: dict[str, Any] = {
         "user_id": body.userId,
@@ -129,6 +162,8 @@ def analyze_credit(
         "session_id": body.sessionId,
         "trace_id": trace_id,
         "workflow_id": body.workflowId,
+        "lock_mode": lock_mode,
+        "lock_owner": lock_owner,
         "income": body.income,
         "occupation": body.occupation,
         "age": body.age,
@@ -143,11 +178,25 @@ def analyze_credit(
         "user_narrative": body.userNarrative,
     }
     try:
+        graph_start = time.perf_counter()
         result = run_credit_workflow(settings, initial)
+        graph_cost_ms = int((time.perf_counter() - graph_start) * 1000)
+        logger.info(
+            "[PERF][agent] workflowId=%s stage=graphRunner cost=%sms",
+            body.workflowId,
+            graph_cost_ms,
+        )
     except RuntimeError as exc:
         if "still running" in str(exc):
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        total_cost_ms = int((time.perf_counter() - total_start) * 1000)
+        logger.info(
+            "[PERF][agent] workflowId=%s stage=analyze.total cost=%sms",
+            body.workflowId,
+            total_cost_ms,
+        )
     return _to_response(result, body)
 
 

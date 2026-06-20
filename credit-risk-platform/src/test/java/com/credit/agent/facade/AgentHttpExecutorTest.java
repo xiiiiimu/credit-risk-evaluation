@@ -1,8 +1,12 @@
 package com.credit.agent.facade;
 
 import com.credit.agent.config.AgentProperties;
+import com.credit.agent.exception.WorkflowRunningException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestClientException;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -40,6 +44,24 @@ class AgentHttpExecutorTest {
             return null;
         }));
         assertThrows(IllegalStateException.class, () -> executor.execute("test", () -> "ok"));
+        assertEquals(2, calls.get());
+    }
+
+    @Test
+    void conflict_does_not_open_circuit_or_retry() {
+        AtomicInteger calls = new AtomicInteger();
+        RestClientException conflict = HttpClientErrorException.create(
+                HttpStatus.CONFLICT, "Conflict", null, null, null);
+
+        assertThrows(WorkflowRunningException.class, () -> executor.execute("credit-analyze", () -> {
+            calls.incrementAndGet();
+            throw conflict;
+        }));
+        assertEquals(1, calls.get());
+        assertThrows(WorkflowRunningException.class, () -> executor.execute("credit-analyze", () -> {
+            calls.incrementAndGet();
+            throw conflict;
+        }));
         assertEquals(2, calls.get());
     }
 }

@@ -3,7 +3,7 @@ from pydantic import ValidationError
 
 from app.nodes.common.llm_json import validate_model
 from app.nodes.common.schema_validator import validate_or_repair
-from app.schemas.credit_assessment import CreditAssessmentSchema
+from app.schemas.credit_assessment import CreditAssessmentSchema, normalize_credit_assessment_payload
 from tests.conftest import MockChatModel
 
 VALID_JSON = """
@@ -30,6 +30,40 @@ def test_credit_assessment_schema_normal_json():
     assert legacy["debtRatio"] == 0.25
     assert legacy["creditScore"] == 720
     assert "riskFactors" in legacy
+
+
+@pytest.mark.parametrize(
+    ("raw_level", "expected"),
+    [
+        ("良好", "LOW"),
+        ("低", "LOW"),
+        ("低风险", "LOW"),
+        ("low", "LOW"),
+        ("Low", "LOW"),
+        ("中等", "MEDIUM"),
+        ("中", "MEDIUM"),
+        ("中风险", "MEDIUM"),
+        ("medium", "MEDIUM"),
+        ("Medium", "MEDIUM"),
+        ("高", "HIGH"),
+        ("高风险", "HIGH"),
+        ("high", "HIGH"),
+        ("High", "HIGH"),
+    ],
+)
+def test_credit_assessment_schema_normalizes_chinese_credit_level(raw_level, expected):
+    raw = (
+        f'{{"creditLevel":"{raw_level}","creditScore":720,'
+        '"incomeDebtRatio":0.25,"confidence":0.9,"summary":"x"}'
+    )
+    model, err = validate_model(
+        raw,
+        CreditAssessmentSchema,
+        normalizer=normalize_credit_assessment_payload,
+    )
+    assert err is None
+    assert model is not None
+    assert model.credit_level == expected
 
 
 def test_credit_assessment_schema_missing_required_field():

@@ -1,6 +1,56 @@
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+_CREDIT_LEVEL_ALIASES: dict[str, str] = {
+    "LOW": "LOW",
+    "MEDIUM": "MEDIUM",
+    "HIGH": "HIGH",
+    "低": "LOW",
+    "良好": "LOW",
+    "低风险": "LOW",
+    "LOWRISK": "LOW",
+    "LOW_RISK": "LOW",
+    "中等": "MEDIUM",
+    "中": "MEDIUM",
+    "中风险": "MEDIUM",
+    "MEDIUMRISK": "MEDIUM",
+    "MEDIUM_RISK": "MEDIUM",
+    "高": "HIGH",
+    "高风险": "HIGH",
+    "HIGHRISK": "HIGH",
+    "HIGH_RISK": "HIGH",
+}
+
+
+def normalize_credit_level(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    direct = _CREDIT_LEVEL_ALIASES.get(text)
+    if direct:
+        return direct
+    upper = text.upper().replace(" ", "").replace("_", "")
+    if upper in {"LOW", "MEDIUM", "HIGH"}:
+        return upper
+    return _CREDIT_LEVEL_ALIASES.get(text.upper()) or _CREDIT_LEVEL_ALIASES.get(upper)
+
+
+def normalize_credit_assessment_payload(data: dict[str, Any]) -> dict[str, Any]:
+    result = dict(data)
+    for key in ("creditLevel", "credit_level"):
+        if key not in result:
+            continue
+        normalized = normalize_credit_level(result[key])
+        if normalized:
+            result[key] = normalized
+            if key == "credit_level":
+                result["creditLevel"] = normalized
+            else:
+                result["credit_level"] = normalized
+    return result
 
 
 class CreditAssessmentSchema(BaseModel):
@@ -10,6 +60,12 @@ class CreditAssessmentSchema(BaseModel):
         alias="creditLevel",
         description="综合信用等级",
     )
+
+    @field_validator("credit_level", mode="before")
+    @classmethod
+    def normalize_level(cls, value: Any) -> Any:
+        normalized = normalize_credit_level(value)
+        return normalized if normalized is not None else value
     credit_score: int = Field(
         alias="creditScore",
         ge=300,

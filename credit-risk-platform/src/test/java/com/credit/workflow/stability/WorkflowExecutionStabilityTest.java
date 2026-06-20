@@ -71,13 +71,14 @@ class WorkflowExecutionStabilityTest {
     void stability_lockExpired_secondWorkerCanAcquireAfterFirstReleased() {
         WorkflowIdempotentResult run = new WorkflowIdempotentResult();
         run.setAction(WorkflowIdempotentAction.RUN);
+        run.setStatus(WorkflowStatus.INIT);
         when(workflowIdempotencyService.resolve("wf-lock")).thenReturn(run);
-        when(workflowPersistenceService.tryAcquireRunning("wf-lock")).thenReturn(true);
         when(workflowLockService.tryLock(eq("wf-lock"), eq("worker-a"))).thenReturn(true);
 
         WorkflowAcquireResult first = workflowExecutionService.acquireForExecution(
                 "wf-lock", "trace-1", 1L, 10L, "worker-a");
         assertTrue(first.isAcquired());
+        assertEquals(WorkflowIdempotentAction.RUN, first.getIdempotentAction());
 
         when(workflowLockService.tryLock(eq("wf-lock"), eq("worker-b"))).thenReturn(false);
         WorkflowAcquireResult second = workflowExecutionService.acquireForExecution(
@@ -86,30 +87,24 @@ class WorkflowExecutionStabilityTest {
         assertEquals(WorkflowIdempotentAction.WAIT, second.getIdempotentAction());
 
         when(workflowLockService.tryLock(eq("wf-lock"), eq("worker-b"))).thenReturn(true);
-        when(workflowPersistenceService.tryAcquireRunning("wf-lock")).thenReturn(true);
         WorkflowAcquireResult third = workflowExecutionService.acquireForExecution(
                 "wf-lock", "trace-1", 2L, 10L, "worker-b");
         assertTrue(third.isAcquired());
+        verify(workflowPersistenceService, never()).tryAcquireRunning(any());
     }
 
     @Test
-    void stability_casFailed_releasesLockAndReturnsWaitOrCached() {
-        WorkflowIdempotentResult run = new WorkflowIdempotentResult();
-        run.setAction(WorkflowIdempotentAction.RUN);
+    void stability_runningWorkflow_returnsWaitWithoutLock() {
         WorkflowIdempotentResult running = new WorkflowIdempotentResult();
         running.setAction(WorkflowIdempotentAction.WAIT);
-        running.setCurrentNode("credit_assessment");
         running.setStatus(WorkflowStatus.RUNNING);
-
-        when(workflowIdempotencyService.resolve("wf-cas")).thenReturn(run, running);
-        when(workflowLockService.tryLock(eq("wf-cas"), any())).thenReturn(true);
-        when(workflowPersistenceService.tryAcquireRunning("wf-cas")).thenReturn(false);
+        when(workflowIdempotencyService.resolve("wf-running")).thenReturn(running);
 
         WorkflowAcquireResult result = workflowExecutionService.acquireForExecution(
-                "wf-cas", "trace-1", 1L, 10L, "worker-a");
+                "wf-running", "trace-1", 1L, 10L, "worker-a");
 
         assertFalse(result.isAcquired());
         assertEquals(WorkflowIdempotentAction.WAIT, result.getIdempotentAction());
-        verify(workflowLockService).unlock("wf-cas");
+        verify(workflowLockService, never()).tryLock(any(), any());
     }
 }

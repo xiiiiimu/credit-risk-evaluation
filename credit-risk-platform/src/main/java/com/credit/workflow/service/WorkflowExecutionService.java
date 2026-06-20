@@ -3,7 +3,6 @@ package com.credit.workflow.service;
 import com.credit.workflow.dto.WorkflowAcquireResult;
 import com.credit.workflow.dto.WorkflowIdempotentResult;
 import com.credit.workflow.enums.WorkflowIdempotentAction;
-import com.credit.workflow.enums.WorkflowStatus;
 import com.credit.workflow.lock.WorkflowLockService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -47,25 +46,18 @@ public class WorkflowExecutionService {
             return result;
         }
 
-        boolean casOk = workflowPersistenceService.tryAcquireRunning(workflowId);
-        if (!casOk) {
-            workflowLockService.unlock(workflowId);
-            WorkflowIdempotentResult retry = workflowIdempotencyService.resolve(workflowId);
-            result.setIdempotentAction(retry.getAction());
-            result.setStatus(retry.getStatus());
-            result.setCurrentNode(retry.getCurrentNode());
-            result.setCachedResultJson(retry.getResultJson());
-            result.setAcquired(false);
-            return result;
-        }
-
+        // 不在 Java 侧 CAS 为 RUNNING：由 Python Agent 在 graph_runner 内 acquire/start，
+        // 避免 resolve 返回 WAIT 后 credit-analyze 仍收到 409。
         result.setAcquired(true);
         result.setIdempotentAction(WorkflowIdempotentAction.RUN);
-        result.setStatus(WorkflowStatus.RUNNING);
         return result;
     }
 
     public void releaseLock(String workflowId) {
         workflowLockService.unlock(workflowId);
+    }
+
+    public boolean isLockHeldBy(String workflowId, String lockOwner) {
+        return workflowLockService.isHeldBy(workflowId, lockOwner);
     }
 }

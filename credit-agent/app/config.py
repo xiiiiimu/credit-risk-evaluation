@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     mcp_server_args: list[str] | None = None
     mcp_server_cwd: str | None = None
 
+    agent_fast_mode: bool = False
     agent_node_timeout_sec: float = 15.0
     agent_circuit_failure_threshold: int = 5
     agent_circuit_open_sec: int = 30

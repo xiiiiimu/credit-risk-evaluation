@@ -50,4 +50,12 @@ public class WorkflowLockService {
         }
         stringRedisTemplate.delete(WorkflowLockConstants.LOCK_PREFIX + workflowId);
     }
+
+    public boolean isHeldBy(String workflowId, String ownerToken) {
+        if (!StringUtils.hasText(workflowId) || !StringUtils.hasText(ownerToken)) {
+            return false;
+        }
+        String current = stringRedisTemplate.opsForValue().get(WorkflowLockConstants.LOCK_PREFIX + workflowId);
+        return ownerToken.equals(current);
+    }
 }
