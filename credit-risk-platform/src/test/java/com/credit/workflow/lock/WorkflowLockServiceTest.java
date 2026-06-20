@@ -7,6 +7,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 import java.util.List;
@@ -51,5 +52,16 @@ class WorkflowLockServiceTest {
     void unlock_deletesKey() {
         workflowLockService.unlock("wf-2");
         verify(stringRedisTemplate).delete(WorkflowLockConstants.LOCK_PREFIX + "wf-2");
+    }
+
+    @Test
+    void isHeldBy_matchesCurrentOwner() {
+        @SuppressWarnings("unchecked")
+        ValueOperations<String, String> valueOps = org.mockito.Mockito.mock(ValueOperations.class);
+        when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.get(WorkflowLockConstants.LOCK_PREFIX + "wf-3")).thenReturn("worker-a");
+
+        assertTrue(workflowLockService.isHeldBy("wf-3", "worker-a"));
+        assertFalse(workflowLockService.isHeldBy("wf-3", "worker-b"));
     }
 }

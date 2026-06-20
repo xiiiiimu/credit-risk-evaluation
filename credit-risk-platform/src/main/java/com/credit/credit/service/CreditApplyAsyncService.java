@@ -12,6 +12,7 @@ import com.credit.input.service.InputFusionService;
 import com.credit.credit.mq.trigger.CreditApprovalTaskTrigger;
 import com.credit.workflow.service.WorkflowPersistenceService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
@@ -20,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @Service
 public class CreditApplyAsyncService {
 
@@ -65,49 +67,75 @@ public class CreditApplyAsyncService {
 
     private Long doSubmitAsync(Long userId, CreditApplySubmitRequest request,
                                String sessionId, String traceId, String idempotencyKey) {
-        StructuredApplicationDTO structured = inputFusionService.fromApply(
-                userId,
-                request.getProductId(),
-                request.getApplyAmount(),
-                request.getApplyTerm(),
-                request.getPurpose(),
-                request.getIncome(),
-                request.getOccupation(),
-                request.getAge(),
-                request.getContactInfo());
-        UserNarrativeDTO narrative = inputFusionService.fromNarrativeFields(
-                request.getLoanPurpose(),
-                request.getIncomeDescription(),
-                request.getOccupationDescription(),
-                request.getAdditionalDescription(),
-                request.getRiskExplanation(),
-                request.getContent());
+        long totalStart = System.nanoTime();
+        Long taskId = null;
+        String workflowId = null;
+        try {
+            long inputFusionStart = System.nanoTime();
+            StructuredApplicationDTO structured = inputFusionService.fromApply(
+                    userId,
+                    request.getProductId(),
+                    request.getApplyAmount(),
+                    request.getApplyTerm(),
+                    request.getPurpose(),
+                    request.getIncome(),
+                    request.getOccupation(),
+                    request.getAge(),
+                    request.getContactInfo());
+            UserNarrativeDTO narrative = inputFusionService.fromNarrativeFields(
+                    request.getLoanPurpose(),
+                    request.getIncomeDescription(),
+                    request.getOccupationDescription(),
+                    request.getAdditionalDescription(),
+                    request.getRiskExplanation(),
+                    request.getContent());
+            log.info("[PERF][submit] stage=inputFusion cost={}ms", elapsedMs(inputFusionStart));
 
-        CreditAsyncTask task = new CreditAsyncTask();
-        task.setUserId(userId);
-        task.setProductId(request.getProductId());
-        task.setApplyAmount(request.getApplyAmount());
-        task.setApplyTerm(request.getApplyTerm() != null ? request.getApplyTerm() : 12);
-        task.setPurpose(request.getPurpose());
-        task.setContent(request.getContent() != null ? request.getContent().trim() : null);
-        task.setStructuredApplicationJson(JSONUtil.toJsonStr(structured));
-        task.setUserNarrativeJson(JSONUtil.toJsonStr(narrative));
-        List<UploadedDocumentDTO> documents = request.getDocuments();
-        if (documents != null && !documents.isEmpty()) {
-            task.setUploadedDocumentsJson(JSONUtil.toJsonStr(documents));
+            CreditAsyncTask task = new CreditAsyncTask();
+            task.setUserId(userId);
+            task.setProductId(request.getProductId());
+            task.setApplyAmount(request.getApplyAmount());
+            task.setApplyTerm(request.getApplyTerm() != null ? request.getApplyTerm() : 12);
+            task.setPurpose(request.getPurpose());
+            task.setContent(request.getContent() != null ? request.getContent().trim() : null);
+            task.setStructuredApplicationJson(JSONUtil.toJsonStr(structured));
+            task.setUserNarrativeJson(JSONUtil.toJsonStr(narrative));
+            List<UploadedDocumentDTO> documents = request.getDocuments();
+            if (documents != null && !documents.isEmpty()) {
+                task.setUploadedDocumentsJson(JSONUtil.toJsonStr(documents));
+            }
+            task.setSessionId(sessionId);
+            task.setTraceId(traceId);
+            task.setWorkflowId(UUID.randomUUID().toString().replace("-", ""));
+            task.setIdempotencyKey(idempotencyKey);
+            task.setStatus(CreditAsyncTask.PENDING);
+            workflowId = task.getWorkflowId();
+
+            long taskInsertStart = System.nanoTime();
+            creditAsyncTaskMapper.insert(task);
+            taskId = task.getId();
+            log.info("[PERF][submit] taskId={} workflowId={} stage=taskInsert cost={}ms",
+                    taskId, workflowId, elapsedMs(taskInsertStart));
+
+            long initWorkflowStart = System.nanoTime();
+            workflowPersistenceService.initWorkflowIfAbsent(
+                    task.getWorkflowId(), traceId, task.getId(), null);
+            log.info("[PERF][submit] taskId={} workflowId={} stage=initWorkflow cost={}ms",
+                    taskId, workflowId, elapsedMs(initWorkflowStart));
+
+            long triggerStart = System.nanoTime();
+            creditApprovalTaskTrigger.trigger(task);
+            log.info("[PERF][submit] taskId={} workflowId={} stage=trigger cost={}ms",
+                    taskId, workflowId, elapsedMs(triggerStart));
+            return task.getId();
+        } finally {
+            log.info("[PERF][submit] taskId={} workflowId={} stage=doSubmitAsync.total cost={}ms",
+                    taskId, workflowId, elapsedMs(totalStart));
         }
-        task.setSessionId(sessionId);
-        task.setTraceId(traceId);
-        task.setWorkflowId(UUID.randomUUID().toString().replace("-", ""));
-        task.setIdempotencyKey(idempotencyKey);
-        task.setStatus(CreditAsyncTask.PENDING);
-        creditAsyncTaskMapper.insert(task);
+    }
 
-        workflowPersistenceService.initWorkflowIfAbsent(
-                task.getWorkflowId(), traceId, task.getId(), null);
-
-        creditApprovalTaskTrigger.trigger(task);
-        return task.getId();
+    private static long elapsedMs(long startNano) {
+        return (System.nanoTime() - startNano) / 1_000_000L;
     }
 
     public CreditAsyncTask getTask(Long taskId, Long userId) {

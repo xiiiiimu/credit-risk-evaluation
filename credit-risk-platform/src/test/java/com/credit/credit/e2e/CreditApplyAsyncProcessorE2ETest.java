@@ -15,21 +15,27 @@ import com.credit.credit.testsupport.CreditAnalysisFixtures;
 import com.credit.credit.trace.CreditWorkflowTraceService;
 import com.credit.credit.workflow.CreditApplyWorkflowService;
 import com.credit.workflow.dto.WorkflowAcquireResult;
+import com.credit.workflow.dto.WorkflowIdempotentResult;
 import com.credit.workflow.enums.WorkflowIdempotentAction;
+import com.credit.workflow.enums.WorkflowStatus;
 import com.credit.workflow.service.WorkflowExecutionService;
+import com.credit.workflow.service.WorkflowIdempotencyService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import java.math.BigDecimal;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -38,6 +44,7 @@ import static org.mockito.Mockito.when;
  * E2E：异步任务链路（Mock Agent / Workflow），验证幂等与终审提交。
  */
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class CreditApplyAsyncProcessorE2ETest {
 
     @Mock
@@ -52,6 +59,8 @@ class CreditApplyAsyncProcessorE2ETest {
     private CreditWorkflowTraceService creditWorkflowTraceService;
     @Mock
     private WorkflowExecutionService workflowExecutionService;
+    @Mock
+    private WorkflowIdempotencyService workflowIdempotencyService;
     @Mock
     private CreditApplicationMapper creditApplicationMapper;
     @Mock
@@ -85,6 +94,11 @@ class CreditApplyAsyncProcessorE2ETest {
         when(creditDraftApplicationService.createDraft(task)).thenReturn(draft);
         when(creditApplyWorkflowService.commit(eq(task), any())).thenReturn(900L);
         when(creditApplicationMapper.selectById(900L)).thenReturn(draft);
+
+        WorkflowIdempotentResult freshIdem = new WorkflowIdempotentResult();
+        freshIdem.setAction(WorkflowIdempotentAction.RUN);
+        freshIdem.setStatus(WorkflowStatus.INIT);
+        when(workflowIdempotencyService.resolve(task.getWorkflowId())).thenReturn(freshIdem);
     }
 
     @Test
@@ -102,15 +116,55 @@ class CreditApplyAsyncProcessorE2ETest {
         acquire.setCachedResultJson(JSONUtil.toJsonStr(cached));
         acquire.setAcquired(false);
         when(workflowExecutionService.acquireForExecution(
-                eq(task.getWorkflowId()), eq(task.getTraceId()), eq(task.getId()), eq(draft.getId()), any()))
+                eq(task.getWorkflowId()), eq(task.getTraceId()), eq(task.getId()), isNull(), any()))
                 .thenReturn(acquire);
 
         processor.run(1L);
 
         verify(agentRemoteClient, never()).analyzeCreditApplication(any(), any());
         verify(creditApplyWorkflowService).commit(eq(task), any());
+        verify(creditDraftApplicationService).createDraft(task);
         assertEquals(CreditAsyncTask.SUCCESS, task.getStatus());
         assertEquals(Long.valueOf(900L), task.getApplicationId());
+    }
+
+    @Test
+    void e2e_runningNotOwned_skipsAgentBeforeHttpCall() {
+        WorkflowIdempotentResult freshIdem = new WorkflowIdempotentResult();
+        freshIdem.setAction(WorkflowIdempotentAction.RUN);
+        freshIdem.setStatus(WorkflowStatus.INIT);
+        WorkflowIdempotentResult runningIdem = new WorkflowIdempotentResult();
+        runningIdem.setAction(WorkflowIdempotentAction.RUN);
+        runningIdem.setStatus(WorkflowStatus.RUNNING);
+        when(workflowIdempotencyService.resolve(task.getWorkflowId()))
+                .thenReturn(freshIdem, runningIdem);
+
+        WorkflowAcquireResult acquire = new WorkflowAcquireResult();
+        acquire.setIdempotentAction(WorkflowIdempotentAction.RUN);
+        acquire.setAcquired(true);
+        acquire.setStatus(WorkflowStatus.INIT);
+        when(workflowExecutionService.acquireForExecution(
+                eq(task.getWorkflowId()), eq(task.getTraceId()), eq(task.getId()), isNull(), any()))
+                .thenReturn(acquire);
+        when(workflowExecutionService.isLockHeldBy(task.getWorkflowId(), "task-1")).thenReturn(false);
+
+        assertFalse(processor.processTask(1L));
+
+        verify(agentRemoteClient, never()).analyzeCreditApplication(any(), any());
+    }
+
+    @Test
+    void e2e_waitRunning_skipsAgentWithoutHttpCall() {
+        WorkflowIdempotentResult waitIdem = new WorkflowIdempotentResult();
+        waitIdem.setAction(WorkflowIdempotentAction.WAIT);
+        waitIdem.setStatus(WorkflowStatus.RUNNING);
+        when(workflowIdempotencyService.resolve(task.getWorkflowId())).thenReturn(waitIdem);
+
+        boolean processed = processor.processTask(1L);
+
+        assertFalse(processed);
+        verify(agentRemoteClient, never()).analyzeCreditApplication(any(), any());
+        verify(workflowExecutionService, never()).acquireForExecution(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -130,7 +184,7 @@ class CreditApplyAsyncProcessorE2ETest {
         acquire.setIdempotentAction(WorkflowIdempotentAction.RUN);
         acquire.setAcquired(true);
         when(workflowExecutionService.acquireForExecution(
-                eq(task.getWorkflowId()), eq(task.getTraceId()), eq(task.getId()), eq(draft.getId()), any()))
+                eq(task.getWorkflowId()), eq(task.getTraceId()), eq(task.getId()), isNull(), any()))
                 .thenReturn(acquire);
         when(agentRemoteClient.analyzeCreditApplication(any(), eq(task.getTraceId()))).thenReturn(agentResp);
 

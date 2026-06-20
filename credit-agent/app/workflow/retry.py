@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from app.nodes.common.schema_validator import SchemaValidationError
 from app.workflow.constants import MAX_NODE_RETRIES, RETRY_BACKOFF_SEC
 
 logger = logging.getLogger("credit.workflow.trace")
@@ -40,6 +41,13 @@ def execute_with_retry(
       return result, retry_count, cost_ms
     except WorkflowManualReviewRequired:
       raise
+    except SchemaValidationError as exc:
+      raise WorkflowManualReviewRequired(
+        node_name,
+        "SCHEMA_VALIDATION_FAILED",
+        exc.outcome.validation_error or str(exc),
+        retry_count,
+      ) from exc
     except Exception as exc:
       last_error = exc
       cost_ms = int((time.time() - start) * 1000)

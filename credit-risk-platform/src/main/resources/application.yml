@@ -49,6 +49,8 @@ rocketmq:
 credit:
   dev:
     expose-login-code: true
+  perf-log:
+    enabled: true
   mq:
     enabled: true
     name-server: 127.0.0.1:9876

@@ -7,13 +7,41 @@ Thumbs.db
 .obsidian/
 .accelerate/
 
-# Secrets
+# Secrets / env (keep .env.example)
 .env
-.env.local
+.env.*
+!.env.example
+!**/.env.example
+**/.env
+**/.env.*
+!**/.env.example
 *.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+**/secrets/
+**/credentials/
 
-# Logs
+# Logs / runtime output
 *.log
+*.log.*
+logs/
+backend.log
+consume.txt
+nohup.out
+
+# JMeter reports & artifacts (keep .jmx test plans)
+jmeter-results/
+jmeter-results-*/
+jmeter-report/
+jmeter-reports/
+**/html-report/
+*.jtl
+jmeter.log
+aggregate-summary.csv
+comparison.csv
 
 # Java
 credit-risk-platform/target/

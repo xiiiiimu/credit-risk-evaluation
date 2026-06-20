@@ -1,8 +1,11 @@
 package com.credit.agent.facade;
 
 import com.credit.agent.config.AgentProperties;
+import com.credit.agent.exception.WorkflowRunningException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
 
@@ -58,13 +61,23 @@ public class AgentHttpExecutor {
                 T result = supplier.get();
                 onSuccess();
                 return result;
+            } catch (WorkflowRunningException e) {
+                throw e;
             } catch (RestClientException e) {
+                if (isWorkflowConflict(e)) {
+                    throw new WorkflowRunningException(
+                            "Agent workflow 正在执行: " + safeMessage(e), e);
+                }
                 last = new RuntimeException(e);
                 log.warn("Agent call failed op={} attempt={}/{} msg={}", operation, attempt, max, e.getMessage());
                 if (attempt < max && isRetryable(e)) {
                     sleep(backoff * attempt);
                 }
             } catch (RuntimeException e) {
+                WorkflowRunningException running = unwrapWorkflowRunning(e);
+                if (running != null) {
+                    throw running;
+                }
                 last = e;
                 break;
             }
@@ -94,9 +107,42 @@ public class AgentHttpExecutor {
         }
     }
 
+    private boolean isWorkflowConflict(RestClientException e) {
+        if (e instanceof HttpClientErrorException) {
+            return HttpStatus.CONFLICT.equals(((HttpClientErrorException) e).getStatusCode());
+        }
+        String msg = e.getMessage();
+        return msg != null && msg.contains("409");
+    }
+
     private boolean isRetryable(RestClientException e) {
+        if (isWorkflowConflict(e)) {
+            return false;
+        }
         return e instanceof ResourceAccessException
                 || (e.getMessage() != null && (e.getMessage().contains("503") || e.getMessage().contains("502")));
+    }
+
+    private WorkflowRunningException unwrapWorkflowRunning(Throwable e) {
+        Throwable cur = e;
+        while (cur != null) {
+            if (cur instanceof WorkflowRunningException) {
+                return (WorkflowRunningException) cur;
+            }
+            cur = cur.getCause();
+        }
+        return null;
+    }
+
+    private String safeMessage(Throwable e) {
+        String msg = e.getMessage();
+        if (msg == null) {
+            return e.getClass().getSimpleName();
+        }
+        if (msg.length() > 200) {
+            return msg.substring(0, 200);
+        }
+        return msg;
     }
 
     private void sleep(long ms) {

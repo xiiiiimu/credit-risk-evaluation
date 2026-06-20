@@ -6,6 +6,7 @@ import com.credit.credit.mq.config.RocketMqApprovalProperties;
 import com.credit.credit.mq.message.CreditApprovalTaskMessage;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.messaging.support.MessageBuilder;
@@ -27,41 +28,72 @@ public class CreditApprovalTaskProducer {
     private CreditApprovalMqAuditService mqAuditService;
 
     public boolean send(CreditAsyncTask task) {
-        if (task == null || task.getId() == null) {
-            return false;
-        }
-        CreditApprovalTaskMessage message = toMessage(task);
-        long start = System.currentTimeMillis();
+        long totalStart = System.nanoTime();
+        Long taskId = task != null ? task.getId() : null;
+        String workflowId = task != null ? task.getWorkflowId() : null;
         try {
-            SendResult result = rocketMQTemplate.syncSend(
-                    properties.destination(),
-                    MessageBuilder.withPayload(message).build(),
-                    properties.getSendTimeoutMs(),
-                    properties.getProducerRetryTimes());
-            long cost = System.currentTimeMillis() - start;
-            mqAuditService.record(
-                    CreditApprovalMqAuditService.EVENT_MQ_SEND_SUCCESS,
-                    message,
-                    true,
-                    cost,
-                    null,
-                    buildSendExtra(result));
-            log.info("[mq-producer] sent taskId={} workflowId={} msgId={}",
-                    task.getId(), task.getWorkflowId(), result.getMsgId());
-            return true;
-        } catch (Exception e) {
-            long cost = System.currentTimeMillis() - start;
-            mqAuditService.record(
-                    CreditApprovalMqAuditService.EVENT_MQ_SEND_FAILED,
-                    message,
-                    false,
-                    cost,
-                    e.getMessage(),
-                    null);
-            log.error("MQ send failed, taskId={}, workflowId={}, topic={}, tag={}",
-                    task.getId(), task.getWorkflowId(), properties.getTopic(), properties.getTag(), e);
-            return false;
+            if (task == null || task.getId() == null) {
+                return false;
+            }
+            long buildStart = System.nanoTime();
+            CreditApprovalTaskMessage message = toMessage(task);
+            log.info("[PERF][submit] taskId={} workflowId={} stage=messageBuild cost={}ms",
+                    taskId, workflowId, elapsedMs(buildStart));
+
+            long syncSendStart = System.nanoTime();
+            try {
+                SendResult result = rocketMQTemplate.syncSend(
+                        properties.destination(),
+                        MessageBuilder.withPayload(message).build(),
+                        properties.getSendTimeoutMs(),
+                        properties.getProducerRetryTimes());
+                long syncSendCost = elapsedMs(syncSendStart);
+                logSendResult(taskId, workflowId, result, syncSendCost);
+
+                mqAuditService.record(
+                        CreditApprovalMqAuditService.EVENT_MQ_SEND_SUCCESS,
+                        message,
+                        true,
+                        syncSendCost,
+                        null,
+                        buildSendExtra(result));
+                log.info("[mq-producer] sent taskId={} workflowId={} msgId={}",
+                        task.getId(), task.getWorkflowId(), result.getMsgId());
+                return true;
+            } catch (Exception e) {
+                long syncSendCost = elapsedMs(syncSendStart);
+                log.info("[PERF][submit] taskId={} workflowId={} stage=syncSend cost={}ms success=false",
+                        taskId, workflowId, syncSendCost);
+                mqAuditService.record(
+                        CreditApprovalMqAuditService.EVENT_MQ_SEND_FAILED,
+                        message,
+                        false,
+                        syncSendCost,
+                        e.getMessage(),
+                        null);
+                log.error("MQ send failed, taskId={}, workflowId={}, topic={}, tag={}",
+                        task.getId(), task.getWorkflowId(), properties.getTopic(), properties.getTag(), e);
+                return false;
+            }
+        } finally {
+            log.info("[PERF][submit] taskId={} workflowId={} stage=producer.send.total cost={}ms",
+                    taskId, workflowId, elapsedMs(totalStart));
         }
+    }
+
+    private void logSendResult(Long taskId, String workflowId, SendResult result, long syncSendCost) {
+        String sendStatus = result != null && result.getSendStatus() != null
+                ? result.getSendStatus().name() : null;
+        String msgId = result != null ? result.getMsgId() : null;
+        String brokerName = null;
+        Integer queueId = null;
+        if (result != null && result.getMessageQueue() != null) {
+            MessageQueue queue = result.getMessageQueue();
+            brokerName = queue.getBrokerName();
+            queueId = queue.getQueueId();
+        }
+        log.info("[PERF][submit] taskId={} workflowId={} stage=syncSend cost={}ms sendStatus={} msgId={} broker={} queueId={}",
+                taskId, workflowId, syncSendCost, sendStatus, msgId, brokerName, queueId);
     }
 
     public CreditApprovalTaskMessage toMessage(CreditAsyncTask task) {
@@ -82,8 +114,16 @@ public class CreditApprovalTaskProducer {
         if (result != null) {
             extra.put("msgId", result.getMsgId());
             extra.put("sendStatus", result.getSendStatus() != null ? result.getSendStatus().name() : null);
+            if (result.getMessageQueue() != null) {
+                extra.put("brokerName", result.getMessageQueue().getBrokerName());
+                extra.put("queueId", result.getMessageQueue().getQueueId());
+            }
         }
         extra.put("destination", properties.destination());
         return extra;
+    }
+
+    private static long elapsedMs(long startNano) {
+        return (System.nanoTime() - startNano) / 1_000_000L;
     }
 }

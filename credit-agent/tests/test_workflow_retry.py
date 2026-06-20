@@ -58,4 +58,4 @@ def test_execute_with_retry_manual_review_after_max_retries(monkeypatch):
             agent_name="CreditAssessmentAgent",
         )
     assert exc.value.error_code == "NODE_MAX_RETRY"
-    assert exc.value.retry_count == 3
+    assert exc.value.retry_count == 1

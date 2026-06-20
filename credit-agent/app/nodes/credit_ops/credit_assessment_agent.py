@@ -1,5 +1,7 @@
 import hashlib
 import json
+import logging
+import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -9,12 +11,18 @@ from app.clients.mcp_credit_client import McpCreditClient, McpTimeoutError
 from app.clients.spring_tool_client import SpringToolClient
 from app.config import Settings
 from app.nodes.common.chat_llm import chat_llm, invoke_llm
-from app.nodes.common.schema_validator import validate_or_repair_strict
+from app.nodes.common.schema_validator import validate_or_repair
 from app.nodes.common.workflow_trace import trace_node
 from app.nodes.credit_ops.credit_workflow_trace import NodeTimer, trace_credit_node
 from app.prompts.loader import load_prompt_meta
-from app.schemas.credit_assessment import CreditAssessmentSchema
+from app.schemas.credit_assessment import (
+    CreditAssessmentSchema,
+    normalize_credit_assessment_payload,
+    normalize_credit_level,
+)
 from app.state.credit_ops_state import CreditOpsState
+
+logger = logging.getLogger("credit.agent.perf")
 
 
 def _merge_evidence(
@@ -42,7 +50,7 @@ def _apply_external_risk_overrides(
     income: dict[str, Any],
 ) -> tuple[dict[str, Any], bool, float, str]:
     adjusted = dict(assessment_json)
-    current_level = str(adjusted.get("creditLevel") or "LOW").upper()
+    current_level = normalize_credit_level(adjusted.get("creditLevel")) or "LOW"
     current_confidence = float(adjusted.get("confidence") or 0.7)
     eligible = bool(adjusted.get("eligible"))
 
@@ -84,6 +92,35 @@ def _apply_external_risk_overrides(
     return adjusted, eligible, debt_to_income_ratio, vote
 
 
+def _fast_mode_mock_raw() -> str:
+    return json.dumps(
+        {
+            "creditLevel": "LOW",
+            "creditScore": 720,
+            "incomeDebtRatio": 0.25,
+            "riskFactors": ["FAST_MODE_MOCK"],
+            "confidence": 0.85,
+            "summary": "fast mode mock result for performance test",
+        },
+        ensure_ascii=False,
+    )
+
+
+def _degraded_assessment_payload(reason: str) -> dict[str, Any]:
+    return {
+        "eligible": False,
+        "creditLevel": "MEDIUM",
+        "creditScore": 650,
+        "incomeDebtRatio": 0.5,
+        "riskFactors": ["SCHEMA_VALIDATION_DEGRADED"],
+        "confidence": 0.3,
+        "summary": reason,
+        "debtRatio": 0.5,
+        "creditScoreEst": 650,
+        "rationale": reason,
+    }
+
+
 def credit_assessment_agent(
     state: CreditOpsState,
     settings: Settings,
@@ -92,8 +129,97 @@ def credit_assessment_agent(
 ) -> dict[str, Any]:
     wf = state.get("workflow_id")
     tid = state.get("trace_id")
+    node_name = "CreditAssessmentAgent"
+    node_start = time.time()
     timer = NodeTimer()
-    trace_node(tool_client, wf, tid, "CreditAssessmentAgent", "start")
+    trace_node(tool_client, wf, tid, node_name, "start")
+
+    if settings.agent_fast_mode:
+        raw = _fast_mode_mock_raw()
+        outcome = validate_or_repair(
+            raw,
+            CreditAssessmentSchema,
+            chat_llm(settings),
+            tool_client=tool_client,
+            trace_id=tid,
+            normalizer=normalize_credit_assessment_payload,
+            workflow_id=wf,
+            node_name=node_name,
+        )
+        validated = outcome.model
+        degraded = outcome.degraded or validated is None
+        if validated is None:
+            assessment_json = _degraded_assessment_payload(
+                outcome.validation_error or "fast mode mock validation failed"
+            )
+            confidence = 0.3
+            assessment_result = assessment_json
+            vote = "SUGGEST_MANUAL"
+            eligible = False
+            debt_ratio = 0.5
+            bureau: dict[str, Any] = {}
+            court: dict[str, Any] = {}
+            income: dict[str, Any] = {}
+            evidence_registry = dict(state.get("evidence_registry") or {})
+            bureau_score = 650
+            evidence_refs: list[str] = []
+        else:
+            assessment_json = validated.to_legacy_json()
+            assessment_result = validated.model_dump(by_alias=True)
+            confidence = float(validated.confidence)
+            bureau = {}
+            court = {}
+            income = {}
+            evidence_registry = dict(state.get("evidence_registry") or {})
+            assessment_json, eligible, debt_ratio, vote = _apply_external_risk_overrides(
+                assessment_json,
+                court=court,
+                income=income,
+            )
+            evidence_refs = list(evidence_registry.keys())
+            assessment_json["evidenceRefs"] = evidence_refs
+            assessment_json["courtEnforcement"] = court
+            assessment_json["incomeStability"] = income
+            bureau_score = int(assessment_json.get("creditScore") or 720)
+            assessment_result = {
+                **(assessment_result or {}),
+                "courtEnforcement": court,
+                "incomeStability": income,
+                "evidenceRefs": evidence_refs,
+            }
+        trace_credit_node(
+            tool_client,
+            state,
+            "credit_assessment",
+            timer.elapsed_ms(),
+            status="DEGRADED" if degraded else "SUCCESS",
+            tool_calls=["FAST_MODE_MOCK"],
+            validation_outcome=outcome,
+        )
+        logger.info(
+            "[PERF][agent] workflowId=%s node=%s stage=nodeTotal cost=%sms degraded=%s",
+            wf,
+            node_name,
+            int((time.time() - node_start) * 1000),
+            degraded,
+        )
+        return {
+            "credit_bureau_json": bureau,
+            "court_enforcement_json": court,
+            "income_stability_json": income,
+            "evidence_registry": evidence_registry,
+            "credit_assessment_json": assessment_json,
+            "credit_assessment_result": assessment_result,
+            "credit_assessment_confidence": confidence,
+            "credit_eligible": eligible,
+            "bureau_unavailable": False,
+            "bureau_credit_score": bureau_score,
+            "income_debt_ratio": debt_ratio,
+            "degraded": degraded,
+            "agent_vote_credit_assessment": vote,
+            "reason": "fast mode mock result for performance test" if not degraded else assessment_json.get("rationale"),
+            "need_manual_review": degraded or vote == "SUGGEST_MANUAL",
+        }
 
     content = (state.get("content") or "").lower()
     force_timeout = "mcp_timeout" in content
@@ -229,45 +355,80 @@ def credit_assessment_agent(
             ensure_ascii=False,
         )
     )
+    llm_start = time.time()
     raw = invoke_llm(llm, [system, human], settings, tool_client=tool_client, audit=audit).content
     raw = raw if isinstance(raw, str) else str(raw)
+    logger.info(
+        "[PERF][agent] workflowId=%s node=%s stage=llmCall cost=%sms",
+        wf,
+        node_name,
+        int((time.time() - llm_start) * 1000),
+    )
 
-    outcome = validate_or_repair_strict(
-        raw, CreditAssessmentSchema, llm, tool_client=tool_client, trace_id=tid
+    outcome = validate_or_repair(
+        raw,
+        CreditAssessmentSchema,
+        llm,
+        tool_client=tool_client,
+        trace_id=tid,
+        normalizer=normalize_credit_assessment_payload,
+        workflow_id=wf,
+        node_name=node_name,
     )
     validated = outcome.model
-    assert validated is not None
-    assessment_json = validated.to_legacy_json()
-    assessment_result = validated.model_dump(by_alias=True)
-    confidence = float(validated.confidence)
-    degraded = outcome.degraded
+    degraded = outcome.degraded or validated is None
+    if validated is None:
+        reason = outcome.validation_error or "LLM output failed schema validation after repair"
+        assessment_json = _degraded_assessment_payload(reason)
+        assessment_result = dict(assessment_json)
+        confidence = 0.3
+        eligible = False
+        debt_ratio = 0.5
+        vote = "SUGGEST_MANUAL"
+        evidence_refs = list(evidence_registry.keys())
+        assessment_json["evidenceRefs"] = evidence_refs
+        assessment_json["courtEnforcement"] = court
+        assessment_json["incomeStability"] = income
+        bureau_score = int(bureau.get("creditScore") or assessment_json.get("creditScore") or 650)
+    else:
+        assessment_json = validated.to_legacy_json()
+        assessment_result = validated.model_dump(by_alias=True)
+        confidence = float(validated.confidence)
 
-    assessment_json, eligible, debt_ratio, vote = _apply_external_risk_overrides(
-        assessment_json,
-        court=court,
-        income=income,
-    )
-    evidence_refs = list(evidence_registry.keys())
-    assessment_json["evidenceRefs"] = evidence_refs
-    assessment_json["courtEnforcement"] = court
-    assessment_json["incomeStability"] = income
+        assessment_json, eligible, debt_ratio, vote = _apply_external_risk_overrides(
+            assessment_json,
+            court=court,
+            income=income,
+        )
+        evidence_refs = list(evidence_registry.keys())
+        assessment_json["evidenceRefs"] = evidence_refs
+        assessment_json["courtEnforcement"] = court
+        assessment_json["incomeStability"] = income
 
-    bureau_score = int(bureau.get("creditScore") or assessment_json.get("creditScore") or 650)
-    assessment_result = {
-        **(assessment_result or {}),
-        "courtEnforcement": court,
-        "incomeStability": income,
-        "evidenceRefs": evidence_refs,
-    }
+        bureau_score = int(bureau.get("creditScore") or assessment_json.get("creditScore") or 650)
+        assessment_result = {
+            **(assessment_result or {}),
+            "courtEnforcement": court,
+            "incomeStability": income,
+            "evidenceRefs": evidence_refs,
+        }
 
     trace_credit_node(
         tool_client,
         state,
         "credit_assessment",
         timer.elapsed_ms(),
+        status="DEGRADED" if degraded else "SUCCESS",
         mcp_latency_ms=mcp_latency_ms,
-        tool_calls=mcp_tool_calls + ["LLM"],
+        tool_calls=mcp_tool_calls + (["LLM"] if not degraded else ["LLM", "SCHEMA_DEGRADED"]),
         validation_outcome=outcome,
+    )
+    logger.info(
+        "[PERF][agent] workflowId=%s node=%s stage=nodeTotal cost=%sms degraded=%s",
+        wf,
+        node_name,
+        int((time.time() - node_start) * 1000),
+        degraded,
     )
     return {
         "credit_bureau_json": bureau,
@@ -283,4 +444,6 @@ def credit_assessment_agent(
         "income_debt_ratio": debt_ratio,
         "degraded": degraded,
         "agent_vote_credit_assessment": vote,
+        "reason": assessment_json.get("rationale") if degraded else None,
+        "need_manual_review": degraded or vote == "SUGGEST_MANUAL",
     }

@@ -20,6 +20,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -75,6 +76,7 @@ class CreditApprovalTaskConsumerTest {
         task.setStatus(CreditAsyncTask.MQ_SENT);
         when(creditAsyncTaskMapper.selectById(2L)).thenReturn(task);
         when(taskGuardService.isTerminal(CreditAsyncTask.MQ_SENT)).thenReturn(false);
+        when(creditApplyAsyncProcessor.processTask(2L)).thenReturn(true);
 
         consumer.onMessage(message);
 
@@ -102,12 +104,40 @@ class CreditApprovalTaskConsumerTest {
         idem.setAction(WorkflowIdempotentAction.WAIT);
         when(workflowIdempotencyService.resolve("wf-3")).thenReturn(idem);
 
-        try {
-            consumer.onMessage(message);
-        } catch (RuntimeException ignored) {
-            // retryable
-        }
+        consumer.onMessage(message);
 
         verify(creditApplyAsyncProcessor, never()).processTask(anyLong());
+        verify(mqAuditService).record(
+                eq(CreditApprovalMqAuditService.EVENT_MQ_CONSUME_SKIP),
+                eq(message), eq(true), anyLong(),
+                eq("workflow in progress duplicate taskId=3"), any());
+        verify(mqAuditService, never()).recordRetry(any(), any(Integer.class), anyString());
+    }
+
+    @Test
+    void onMessage_skipProcessorInProgressDuplicate() {
+        CreditApprovalTaskMessage message = CreditApprovalTaskMessage.builder()
+                .taskId(4L)
+                .workflowId("wf-4")
+                .traceId("t-4")
+                .build();
+        CreditAsyncTask task = new CreditAsyncTask();
+        task.setId(4L);
+        task.setWorkflowId("wf-4");
+        task.setStatus(CreditAsyncTask.MQ_SENT);
+        when(creditAsyncTaskMapper.selectById(4L)).thenReturn(task);
+        when(taskGuardService.isTerminal(CreditAsyncTask.MQ_SENT)).thenReturn(false);
+        when(creditApplyAsyncProcessor.processTask(4L)).thenReturn(false);
+
+        consumer.onMessage(message);
+
+        verify(creditApplyAsyncProcessor).processTask(4L);
+        verify(mqAuditService).record(
+                eq(CreditApprovalMqAuditService.EVENT_MQ_CONSUME_SKIP),
+                eq(message), eq(true), anyLong(),
+                eq("workflow in progress duplicate during process taskId=4"), any());
+        verify(mqAuditService, never()).record(
+                eq(CreditApprovalMqAuditService.EVENT_MQ_CONSUME_SUCCESS),
+                eq(message), eq(true), anyLong(), isNull(), isNull());
     }
 }

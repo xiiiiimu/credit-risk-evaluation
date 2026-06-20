@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import time
 from functools import partial
 from typing import Any, Callable
 
@@ -20,6 +22,11 @@ from app.workflow.response_mapper import response_dict_to_state, state_to_respon
 from app.workflow.persistence import WorkflowPersistenceClient
 from app.workflow.retry import WorkflowManualReviewRequired, execute_with_retry
 from app.resilience.agent_runtime import AgentRuntimeGuard
+
+logger = logging.getLogger(__name__)
+
+LOCK_MODE_JAVA_OWNED = "JAVA_OWNED"
+TERMINAL_STATUSES = frozenset({"SUCCESS", "FAILED", "MANUAL_REVIEW"})
 
 
 def build_node_callables(settings: Settings, tool_client: SpringToolClient) -> dict[str, Callable[[dict[str, Any]], dict[str, Any]]]:
@@ -58,21 +65,76 @@ def _resume_start_index(checkpoint: dict[str, Any] | None) -> int:
   return NODE_ORDER.index(current) + 1
 
 
-def run_credit_workflow(settings: Settings, initial: dict[str, Any]) -> dict[str, Any]:
-  workflow_id = initial.get("workflow_id")
-  if not workflow_id:
-    raise ValueError("workflow_id is required")
+def normalize_lock_mode(value: str | None) -> str | None:
+  if not value:
+    return None
+  normalized = value.strip().upper().replace("-", "_")
+  if normalized in ("JAVA_OWNED", "JAVAOWNED"):
+    return LOCK_MODE_JAVA_OWNED
+  return normalized
 
-  trace_id = initial.get("trace_id")
-  tool_client = SpringToolClient(settings)
-  persistence = WorkflowPersistenceClient(tool_client)
 
-  idem = persistence.resolve_idempotent(workflow_id, trace_id)
+def is_java_owned(initial: dict[str, Any]) -> bool:
+  return normalize_lock_mode(initial.get("lock_mode")) == LOCK_MODE_JAVA_OWNED
+
+
+def _state_from_cached(cached: Any) -> dict[str, Any]:
+  if not isinstance(cached, dict):
+    return {}
+  if cached.get("workflowId"):
+    return response_dict_to_state(cached)
+  return cached
+
+
+def _terminal_fallback_state(initial: dict[str, Any], status: str) -> dict[str, Any]:
+  return {
+    "workflow_id": initial.get("workflow_id"),
+    "need_manual_review": True,
+    "agent_suggestion": "SUGGEST_MANUAL",
+    "consensus_suggestion": "SUGGEST_MANUAL",
+    "reason": f"workflow already terminal status={status}",
+    "ai_summary": f"workflow already terminal status={status}",
+    "degraded": True,
+  }
+
+
+def _prepare_java_owned_execution(
+  persistence: WorkflowPersistenceClient,
+  initial: dict[str, Any],
+  workflow_id: str,
+  trace_id: str | None,
+  idem: dict[str, Any],
+) -> dict[str, Any] | None:
+  action = idem.get("action")
+  status = idem.get("status")
+  if action == "RETURN_RESULT":
+    return _state_from_cached(idem.get("result") or {})
+  if status in TERMINAL_STATUSES:
+    cached = idem.get("result") or {}
+    if isinstance(cached, dict) and cached:
+      return _state_from_cached(cached)
+    return _terminal_fallback_state(initial, status or "UNKNOWN")
+  persistence.start_workflow(
+    workflow_id,
+    trace_id,
+    initial.get("task_id"),
+    initial.get("application_id"),
+  )
+  return None
+
+
+def _self_managed_acquire(
+  persistence: WorkflowPersistenceClient,
+  initial: dict[str, Any],
+  workflow_id: str,
+  trace_id: str | None,
+  idem: dict[str, Any],
+) -> tuple[dict[str, Any] | None, bool]:
   action = idem.get("action")
   if action == "RETURN_RESULT":
     cached = idem.get("result") or {}
     if isinstance(cached, dict):
-      return response_dict_to_state(cached) if cached.get("workflowId") else cached
+      return _state_from_cached(cached), False
   if action == "WAIT":
     raise RuntimeError(f"workflow {workflow_id} is still running at node {idem.get('currentNode')}")
 
@@ -89,7 +151,7 @@ def run_credit_workflow(settings: Settings, initial: dict[str, Any]) -> dict[str
     if acquire.get("action") == "RETURN_RESULT":
       cached = acquire.get("result") or {}
       if isinstance(cached, dict):
-        return response_dict_to_state(cached) if cached.get("workflowId") else cached
+        return _state_from_cached(cached), False
     if not acquire.get("acquired"):
       raise RuntimeError(f"workflow {workflow_id} is still running at node {acquire.get('currentNode')}")
     lock_held = True
@@ -100,6 +162,29 @@ def run_credit_workflow(settings: Settings, initial: dict[str, Any]) -> dict[str
       initial.get("task_id"),
       initial.get("application_id"),
     )
+  return None, lock_held
+
+
+def run_credit_workflow(settings: Settings, initial: dict[str, Any]) -> dict[str, Any]:
+  workflow_id = initial.get("workflow_id")
+  if not workflow_id:
+    raise ValueError("workflow_id is required")
+
+  trace_id = initial.get("trace_id")
+  java_owned = is_java_owned(initial)
+  tool_client = SpringToolClient(settings)
+  persistence = WorkflowPersistenceClient(tool_client)
+
+  idem = persistence.resolve_idempotent(workflow_id, trace_id)
+  lock_held = False
+  if java_owned:
+    cached_state = _prepare_java_owned_execution(persistence, initial, workflow_id, trace_id, idem)
+    if cached_state is not None:
+      return cached_state
+  else:
+    cached_state, lock_held = _self_managed_acquire(persistence, initial, workflow_id, trace_id, idem)
+    if cached_state is not None:
+      return cached_state
 
   try:
     return _run_workflow_body(

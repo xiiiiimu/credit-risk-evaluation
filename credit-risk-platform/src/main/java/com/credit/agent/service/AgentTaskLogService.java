@@ -61,7 +61,8 @@ public class AgentTaskLogService {
         try {
             agentTaskLogMapper.insert(taskLog);
         } catch (Exception e) {
-            log.warn("Agent task log insert failed: {}", e.getMessage());
+            log.error("Agent task log insert failed tool={} callType={} agentName={}",
+                    toolName, callType, agentName, e);
         }
     }
 }

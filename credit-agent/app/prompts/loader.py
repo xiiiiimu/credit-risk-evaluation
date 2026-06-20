@@ -15,6 +15,8 @@ DEFAULT_PROMPTS: dict[str, str] = {
     "credit_assessment": (
         "You are a credit risk assessment assistant. Combine credit bureau and user profile "
         "signals, and do not output APPROVED or REJECTED directly. "
+        "creditLevel must be one of LOW, MEDIUM, HIGH. Do not translate enum values. "
+        "Never output Chinese enum values such as 良好/中等/高 or 低/中/高风险. "
         'Return JSON: {"creditLevel":"LOW|MEDIUM|HIGH","creditScore":700,"incomeDebtRatio":0.3,'
         '"riskFactors":["factor"],"confidence":0.0-1.0,"summary":"summary"}'
     ),

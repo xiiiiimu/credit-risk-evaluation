@@ -1,4 +1,9 @@
+# Secrets (keep .env.example)
 .env
+.env.*
+!.env.example
+
+# Python runtime
 .venv/
 venv/
 __pycache__/
@@ -9,3 +14,7 @@ __pycache__/
 dist/
 *.egg-info/
 .idea/
+
+# Logs
+*.log
+logs/
