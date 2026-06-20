@@ -1,0 +1,8 @@
+credit:
+  mq:
+    enabled: false
+
+rocketmq:
+  name-server: 127.0.0.1:9876
+  producer:
+    group: credit-approval-producer-test

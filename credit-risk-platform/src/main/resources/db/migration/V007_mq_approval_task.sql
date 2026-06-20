@@ -1,0 +1,4 @@
+-- V007: 审批任务 MQ 触发（task 状态扩展说明）
+-- 新增状态值（varchar 字段无需 ALTER）：
+--   MQ_SENT, MQ_SEND_FAILED, MANUAL_REVIEW
+-- Workflow 仍为事实源；MQ 仅触发执行。

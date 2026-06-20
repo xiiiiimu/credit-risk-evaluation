@@ -1,0 +1,41 @@
+Credit Approval Submit Load Test - Direct Mode (credit.mq.enabled=false)
+================================================================================
+Test time: 2026-06-20 01:03:52 CST
+Mode: DirectCreditApprovalTaskTrigger (pre-MQ / @Async equivalent)
+Config: credit.mq.enabled=false
+
+Pre-check submit response: {"success":true,"data":{...,"status":"PENDING"}}
+
+Submit Apply Metrics (03 Submit Apply)
+------------------------------------
+Samples: 1000
+Error %: 0.00%
+Average: 290 ms
+Min: 88 ms
+Max: 673 ms
+Throughput: 96.99 req/s
+P90: 431 ms
+P95: 481 ms
+P99: 547 ms
+
+Verification
+------------
+MQ_SEND_SUCCESS (last 5 min): 0
+Expected submit status: PENDING (not MQ_SENT)
+
+Output Files
+------------
+JTL: E:\credit_risk\jmeter-results-direct\result.jtl
+HTML Report: E:\credit_risk\jmeter-results-direct\html-report\index.html
+
+Comparison vs MQ mode (jmeter-results)
+--------------------------------------
+| Metric      | Direct (PENDING) | MQ (MQ_SENT) |
+| Average     | 290 ms           | 2543 ms      |
+| P95         | 481 ms           | 6670 ms      |
+| Throughput  | 96.99 req/s      | 18.10 req/s  |
+| Error %     | 0%               | 0%           |
+
+Conclusion
+----------
+本次直连模式压测共执行 submit 请求 1000 次，HTTP 错误率为 0.00%，平均响应时间为 290 ms，P95 为 481 ms，吞吐量为 96.99 req/s。同步返回 status=PENDING，无 MQ 投递环节，submit 接口响应明显快于 MQ 模式（MQ 模式平均 2543 ms / P95 6670 ms），说明 RocketMQ 异步化改造后 submit 路径以消息投递为主，接口耗时上升但实现了与下游处理的解耦。

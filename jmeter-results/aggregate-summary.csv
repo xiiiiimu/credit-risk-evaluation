@@ -1,0 +1,3 @@
+label,# samples,Average,Min,Max,Error %,Throughput,P90,P95,P99
+03 Submit Apply,1000,2543,317,13704,0.00%,18.10 req/s,4833,6670,9459
+Total (all samplers),1002,2538,27,13704,0.00%,17.16 req/s,4833,6665,9459

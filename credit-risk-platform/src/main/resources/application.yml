@@ -1,0 +1,95 @@
+server:
+  port: 8082
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+spring:
+  application:
+    name: credit-risk-platform
+  datasource:
+    driver-class-name: com.mysql.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3307/credit?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8
+    username: root
+  redis:
+    host: 127.0.0.1
+    port: 6379
+    lettuce:
+      pool:
+        max-active: 10
+        max-idle: 10
+        min-idle: 1
+        time-between-eviction-runs: 10s
+  jackson:
+    default-property-inclusion: non_null
+
+mybatis-plus:
+  type-aliases-package: com.credit.user.entity,com.credit.agent.entity,com.credit.credit.entity
+  mapper-locations: classpath:/mapper/**/*.xml
+
+logging:
+  level:
+    com.credit: debug
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
+
+rocketmq:
+  name-server: 127.0.0.1:9876
+  producer:
+    group: credit-approval-producer
+    send-message-timeout: 3000
+    retry-times-when-send-failed: 2
+
+credit:
+  dev:
+    expose-login-code: true
+  mq:
+    enabled: true
+    name-server: 127.0.0.1:9876
+    producer-group: credit-approval-producer
+    consumer-group: credit-approval-task-consumer
+    topic: credit-approval-task-topic
+    tag: credit-apply
+    send-timeout-ms: 3000
+    producer-retry-times: 2
+    consumer-thread-min: 4
+    consumer-thread-max: 16
+    max-reconsume-times: 16
+    dlq-topic: '%DLQ%credit-approval-task-consumer'
+    dlq-consumer-group: credit-approval-task-dlq-consumer
+  agent:
+    base-url: http://127.0.0.1:8090
+    internal-api-key: credit-agent-secret
+    connect-timeout-ms: 5000
+    read-timeout-ms: 60000
+    retry-max-attempts: 3
+    retry-backoff-ms: 300
+    circuit-failure-threshold: 5
+    circuit-open-ms: 30000
+    circuit-half-open-max-probes: 1
+    health-check-interval-ms: 10000
+    cache:
+      enabled: true
+      llm-ttl-hours: 24
+      ocr-ttl-hours: 72
+    admin-user-ids: 1,999
+    chat-history-limit: 5
+    risk:
+      high-decay-days: 14
+      medium-decay-days: 7
+      auto-max-complaint-7d: 1
+      auto-max-compensation-30d: 1
+      auto-min-confidence: 0.85
+    credit:
+      fraud-reject-threshold: 80
+      fraud-manual-threshold: 50
+    ocr:
+      provider: mock
+      min-confidence: 0.75
+      block-on-quality-issue: true

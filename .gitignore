@@ -1,0 +1,41 @@
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+.obsidian/
+.accelerate/
+
+# Secrets
+.env
+.env.local
+*.pem
+
+# Logs
+*.log
+
+# Java
+credit-risk-platform/target/
+*.class
+*.jar
+!**/src/main/**/lib/*.jar
+
+# Python
+credit-agent/.venv/
+credit-agent/venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Node
+credit-risk-web/node_modules/
+credit-risk-web/dist/
+
+# Local junk (do not commit)
+Navicat Premium 16/
+scripts/

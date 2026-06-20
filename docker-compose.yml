@@ -1,0 +1,98 @@
+services:
+  credit-mysql:
+    image: mysql:5.7
+    container_name: credit-mysql
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: credit
+    ports:
+      - "3307:3306"
+    volumes:
+      - credit_mysql_data:/var/lib/mysql
+
+  credit-redis:
+    image: redis:7-alpine
+    container_name: credit-redis
+    ports:
+      - "6379:6379"
+
+  credit-rmqnamesrv:
+    image: apache/rocketmq:4.9.7
+    container_name: credit-rmqnamesrv
+    ports:
+      - "9876:9876"
+    command: sh mqnamesrv
+
+  credit-rmqbroker:
+    image: apache/rocketmq:4.9.7
+    container_name: credit-rmqbroker
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+    environment:
+      NAMESRV_ADDR: credit-rmqnamesrv:9876
+      JAVA_OPT_EXT: "-Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m"
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/conf/broker.conf:ro
+    command: sh -c "cd /home/rocketmq/rocketmq-4.9.7/bin && sh mqbroker -n credit-rmqnamesrv:9876 -c /home/rocketmq/conf/broker.conf"
+    depends_on:
+      - credit-rmqnamesrv
+
+  credit-rmq-init:
+    image: apache/rocketmq:4.9.7
+    container_name: credit-rmq-init
+    environment:
+      NAMESRV_ADDR: credit-rmqnamesrv:9876
+      TOPIC: credit-approval-task-topic
+    volumes:
+      - ./docker/rocketmq/init-topic.sh:/init-topic.sh:ro
+    entrypoint: ["sh", "/init-topic.sh"]
+    depends_on:
+      - credit-rmqbroker
+    restart: "no"
+
+  credit-backend:
+    build:
+      context: ./credit-risk-platform
+    container_name: credit-backend
+    depends_on:
+      - credit-mysql
+      - credit-redis
+      - credit-rmqbroker
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://credit-mysql:3306/credit?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=utf8
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD:
+      SPRING_REDIS_HOST: credit-redis
+      ROCKETMQ_NAME_SERVER: credit-rmqnamesrv:9876
+      CREDIT_MQ_ENABLED: "true"
+      CREDIT_AGENT_BASE_URL: http://credit-agent:8090
+      CREDIT_AGENT_INTERNAL_API_KEY: credit-agent-secret
+    ports:
+      - "8082:8082"
+
+  credit-agent:
+    build:
+      context: ./credit-agent
+    container_name: credit-agent
+    depends_on:
+      - credit-backend
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SPRING_TOOL_BASE_URL: http://credit-backend:8082
+      INTERNAL_API_KEY: credit-agent-secret
+    ports:
+      - "8090:8090"
+
+  credit-web:
+    build:
+      context: ./credit-risk-web
+    container_name: credit-web
+    depends_on:
+      - credit-backend
+      - credit-agent
+    ports:
+      - "80:80"
+
+volumes:
+  credit_mysql_data:
