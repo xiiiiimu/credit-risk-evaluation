@@ -126,8 +126,9 @@ Avoid dual-write inconsistency. Write to MySQL, delete cache on commit, rebuild 
 
 | Gap | Current behavior | Recommended fix |
 |-----|------------------|-----------------|
-| DB + MQ not atomic | Task may stay `MQ_SEND_FAILED` | Transactional Outbox |
-| No auto redelivery job | Admin API manual redelivery | Scheduled compensation task |
+| Task/MQ 一致落库 | **已实现** MySQL Polling Outbox（task/workflow/outbox 同事务） | 生产化可升级为 binlog/CDC outbox |
+| Outbox 运维 | SENDING 超时 2 分钟自动恢复；失败指数退避 | outbox 指标告警、死信事件自动巡检 |
+| No auto redelivery job | Admin API 重置 outbox 补发 | Scheduled compensation task |
 | Commit idempotency | Relies on lock + workflow SUCCESS cache | Business-level commit idempotency key |
 
 ---

@@ -131,7 +131,7 @@ public class CacheClient {
             return r;
         }
 
-        String lockKey = LOCK_CACHE_REBUILD_KEY + id;
+        String lockKey = LOCK_CACHE_REBUILD_KEY + key;
         boolean isLock = tryLock(lockKey);
         if(isLock){
             CACHE_REBUILD_EXECUTOR.submit(()->{

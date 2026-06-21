@@ -45,6 +45,7 @@ public class CreditApplyAsyncService {
 
     public Long submitAsync(Long userId, CreditApplySubmitRequest request,
                             String sessionId, String traceId, String idempotencyKey) {
+        // 幂等以 tb_agent_idempotent_record(scope, idempotency_key) 唯一约束为准，不依赖 credit_async_task 查重。
         if (idempotencyKey == null || idempotencyKey.trim().isEmpty()) {
             return doSubmitAsync(userId, request, sessionId, traceId, null);
         }

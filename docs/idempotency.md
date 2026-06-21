@@ -15,10 +15,13 @@ Flow (`IdempotencyService` + `CreditApplyAsyncService.submitAsync()`):
    - **抢锁成功** → 写入 `tb_agent_idempotent_record`（`status=PROCESSING`）→ 创建 task/workflow/outbox → 保存 `{taskId}` 到 `responseJson`（`status=SUCCESS`）
    - **抢锁失败** → 只读 MySQL 幂等记录，返回相同 `taskId`；**不再执行 supplier**
    - 若抢锁失败但 `responseJson` 尚未写入 → 每 100ms 轮询，最多 3s；超时抛出 `same idempotency key is processing, retry later`
+   - 若 `status=FAILED` → **不**重新执行 supplier，抛出 `Same Idempotency-Key has failed before...`
    - 同一 key 携带不同请求体（`request_hash` 不一致）→ 抛出 `IdempotencyConflictException`
    - MySQL `(scope, idempotency_key)` 唯一索引 + `DuplicateKeyException` 兜底
 
 Implementation: `CreditApplyAsyncService.submitAsync()` — **不再**直接查 `tb_credit_async_task` 做幂等。
+
+> 最终幂等以 `tb_agent_idempotent_record(scope, idempotency_key)` 唯一约束为准；`tb_credit_async_task.idempotency_key` 仅为普通索引。
 
 ### Layer 2 — Workflow State
 

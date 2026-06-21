@@ -8,7 +8,7 @@
 
 ## Features
 
-- **RocketMQ 异步审批** — 申请提交与 Agent 执行解耦，`syncSend` 确认投递，失败标记 `MQ_SEND_FAILED` 并支持管理端补偿
+- **RocketMQ 异步审批** — Submit 与 Agent 解耦：Task + Workflow + Outbox 同事务落库，由 `MqOutboxPublisher` 异步投递 RocketMQ
 - **Workflow + Checkpoint** — 10 节点顺序执行，MySQL 持久化节点状态，进程重启后从最后成功节点续跑
 - **Multi-Agent + Java 规则终审** — 文档审核 / 征信评估 / 反欺诈三 Agent 加权共识，额度与利率由规则引擎计算
 - **三层幂等** — HTTP `Idempotency-Key`、Workflow 状态缓存、Redis 分布式锁 + DB CAS
@@ -33,9 +33,9 @@ flowchart LR
     Rule[CreditApprovalEngine]
 
     User -->|POST /api/credit/apply/submit| SB
-    SB --> MySQL
+    SB -->|Task+Workflow+Outbox TX| MySQL
     SB --> Redis
-    SB -->|syncSend taskId| MQ
+    SB -->|OutboxPublisher| MQ
     MQ --> Consumer
     Consumer --> SB
     SB -->|HTTP analyze| Agent
@@ -49,7 +49,7 @@ flowchart LR
 **调用概要**
 
 ```
-Submit → 创建 AsyncTask + Workflow(INIT) → RocketMQ
+Submit → Task + Workflow + Outbox 同事务落库 → OutboxPublisher → RocketMQ
        → Consumer → Redis Lock + CAS → Python Agent (10 nodes)
        → Java commit → CreditApprovalEngine 终审 → 前端轮询结果
 ```
@@ -152,7 +152,7 @@ More setup details: [docs/deployment.md](docs/deployment.md)
 
 | Topic | Summary | Details |
 |-------|---------|---------|
-| **Reliable MQ Workflow** | `syncSend` + task status machine + DLQ → manual review; admin redelivery API | [docs/rocketmq.md](docs/rocketmq.md) |
+| **Reliable MQ Workflow** | Polling Outbox + task status machine + DLQ → manual review; admin outbox redelivery | [docs/rocketmq.md](docs/rocketmq.md) |
 | **Workflow Persistence** | `tb_workflow` / `_node` / `_checkpoint`; 3 retries with 2/4/8s backoff | [docs/workflow.md](docs/workflow.md) |
 | **Agent Decision Flow** | 3 LLM agents + weighted consensus; Java owns final approval | [docs/agent.md](docs/agent.md) |
 | **Idempotency** | Submit key → Workflow result cache → Redis lock + CAS | [docs/idempotency.md](docs/idempotency.md) |
@@ -172,7 +172,7 @@ JMeter script: `credit-approval-submit-test.jmx` — 1000 concurrent submit requ
 | **MQ** (`credit.mq.enabled=true`) | 2543 ms | 6670 ms | 18.10 req/s | `MQ_SENT` |
 | **Direct** (local thread pool fallback) | 290 ms | 481 ms | 96.99 req/s | `PENDING` |
 
-**Interpretation:** Direct mode uses in-process `ThreadPoolTaskExecutor` — faster submit response, no broker overhead. MQ mode adds durable delivery, consumer retry, DLQ, and audit trail — suitable for reliable async task dispatch at the cost of higher submit latency (includes `syncSend` confirmation).
+**Interpretation:** Direct mode uses in-process `ThreadPoolTaskExecutor` — faster submit response, no broker overhead. MQ mode uses Polling Outbox: HTTP returns after DB commit; RocketMQ send is async via `MqOutboxPublisher`, with consumer retry, DLQ, and audit trail.
 
 Raw reports: `jmeter-results/`, `jmeter-results-direct/`. Full analysis: [docs/performance.md](docs/performance.md)
 
@@ -210,9 +210,8 @@ cd credit-risk-platform && mvn test -Dtest="*E2ETest,*GrayTest,*StabilityTest"
 
 ## Roadmap
 
-- [ ] `asyncSend` + callback to reduce submit RT while keeping delivery guarantee
-- [ ] Scheduled scanner for `MQ_SEND_FAILED` auto-redelivery
-- [ ] Transactional Outbox for atomic DB insert + MQ send
+- [ ] Scheduled scanner for `MQ_SEND_FAILED` auto-redelivery (outbox reset)
+- [ ] Upgrade polling outbox to binlog/CDC-based outbox for production scale
 - [ ] Prometheus / Grafana dashboards on top of Micrometer
 - [ ] CI/CD pipeline (GitHub Actions)
 - [ ] Distributed LLM rate limiter for multi Agent instances

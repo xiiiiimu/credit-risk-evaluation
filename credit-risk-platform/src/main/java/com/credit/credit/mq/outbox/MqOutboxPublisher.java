@@ -20,6 +20,13 @@ import java.util.List;
 @Slf4j
 @Component
 @ConditionalOnProperty(name = "credit.mq.enabled", havingValue = "true", matchIfMissing = true)
+/**
+ * MySQL Polling Outbox 发送器。
+ * <p>
+ * SENDING 超时恢复：若 Publisher 在 CAS 为 SENDING 之后、更新 SENT/FAILED 之前宕机，
+ * 事件会卡在 SENDING；扫描时会重新捞起超过 2 分钟未更新的 SENDING 事件。
+ * 重复发送仍可能发生，因此 Consumer 端终态检查、Workflow 状态检查、Redis Lock 与 MySQL CAS 必须保留。
+ */
 public class MqOutboxPublisher {
 
     private static final int BATCH_SIZE = 20;

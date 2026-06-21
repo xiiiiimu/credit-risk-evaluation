@@ -138,6 +138,53 @@ class IdempotencyServiceTest {
         verify(stringRedisTemplate).delete("idempotent:credit.apply.submit:idem-3");
     }
 
+    @Test
+    void execute_failedRecord_doesNotReRunSupplier() {
+        when(valueOperations.setIfAbsent(anyString(), eq("1"), eq(24L), any())).thenReturn(true);
+        AgentIdempotentRecord failed = new AgentIdempotentRecord();
+        failed.setScope("credit.apply.submit");
+        failed.setIdempotencyKey("idem-failed");
+        failed.setRequestHash("hash-f");
+        failed.setStatus(IdempotencyStatus.FAILED);
+        failed.setErrorMsg("submit tx failed");
+        when(idempotentRecordMapper.selectOne(any(QueryWrapper.class))).thenReturn(failed);
+
+        assertThrows(IdempotencyFailedException.class, () -> idempotencyService.execute(
+                "credit.apply.submit",
+                "idem-failed",
+                "hash-f",
+                () -> {
+                    Map<String, Object> m = new HashMap<>();
+                    m.put("taskId", 999L);
+                    return m;
+                },
+                Map.class));
+        verify(idempotentRecordMapper, never()).updateById(argThat(r ->
+                IdempotencyStatus.PROCESSING.equals(((AgentIdempotentRecord) r).getStatus())));
+    }
+
+    @Test
+    void execute_failedRecordOnWaitPath_throwsFailed() {
+        when(valueOperations.setIfAbsent(anyString(), eq("1"), eq(24L), any())).thenReturn(false);
+        AgentIdempotentRecord failed = new AgentIdempotentRecord();
+        failed.setScope("credit.apply.submit");
+        failed.setIdempotencyKey("idem-f2");
+        failed.setRequestHash("hash-f2");
+        failed.setStatus(IdempotencyStatus.FAILED);
+        when(idempotentRecordMapper.selectOne(any(QueryWrapper.class))).thenReturn(failed);
+
+        assertThrows(IdempotencyFailedException.class, () -> idempotencyService.execute(
+                "credit.apply.submit",
+                "idem-f2",
+                "hash-f2",
+                () -> {
+                    Map<String, Object> m = new HashMap<>();
+                    m.put("taskId", 888L);
+                    return m;
+                },
+                Map.class));
+    }
+
     private AgentIdempotentRecord successRecord(long taskId) {
         return successRecordWithHash(taskId, "hash-1");
     }
