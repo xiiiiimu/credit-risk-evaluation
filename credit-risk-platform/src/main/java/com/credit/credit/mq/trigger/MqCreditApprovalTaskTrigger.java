@@ -9,6 +9,9 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
 
+/**
+ * 历史 MQ 触发器。Submit 路径已改为 Transactional Outbox，由 {@link com.credit.credit.mq.outbox.MqOutboxPublisher} 统一发送。
+ */
 @Slf4j
 @Component
 @ConditionalOnProperty(name = "credit.mq.enabled", havingValue = "true", matchIfMissing = true)

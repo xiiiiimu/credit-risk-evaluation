@@ -17,5 +17,8 @@ public class AgentIdempotentRecord {
     private String idempotencyKey;
     private String requestHash;
     private String responseJson;
+    private String status;
+    private String errorMsg;
     private LocalDateTime createTime;
+    private LocalDateTime updateTime;
 }

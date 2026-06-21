@@ -45,8 +45,7 @@ public class CreditApprovalTaskProducer {
                 SendResult result = rocketMQTemplate.syncSend(
                         properties.destination(),
                         MessageBuilder.withPayload(message).build(),
-                        properties.getSendTimeoutMs(),
-                        properties.getProducerRetryTimes());
+                        properties.getSendTimeoutMs());
                 long syncSendCost = elapsedMs(syncSendStart);
                 logSendResult(taskId, workflowId, result, syncSendCost);
 
