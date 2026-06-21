@@ -41,7 +41,7 @@ Additional stats (Direct mode):
 
 ### MQ mode (production default)
 
-- Submit includes `CreditApprovalTaskProducer.syncSend()` with 3s timeout + 2 retries
+- Submit returns after task/workflow/outbox DB commit — RocketMQ send is async via `MqOutboxPublisher`
 - All samples returned `MQ_SENT` — broker delivery confirmed
 - **Pros:** Durable dispatch, consumer retry, DLQ, audit trail, horizontal scaling
 - **Cons:** Higher submit RT (~2543 ms avg) due to sync send confirmation and broker round-trip
@@ -72,6 +72,5 @@ HTML reports: `jmeter-results/html-report/`, `jmeter-results-direct/html-report/
 
 ## Optimization Roadmap (submit RT)
 
-- Switch producer to `asyncSend` + callback — reduce submit blocking while tracking send result
-- Transactional Outbox — decouple DB commit from send confirmation
+- Upgrade polling outbox metrics/alerting; optional binlog/CDC outbox at scale
 - Separate "accept" and "dispatch" phases in API response design

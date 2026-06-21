@@ -38,9 +38,9 @@ Consumer reloads full context from `tb_credit_async_task` in MySQL.
 
 **Rationale:** DB is source of truth; small messages avoid stale payload issues.
 
-## Producer Flow (Transactional Outbox)
+## Producer Flow (MySQL Polling Outbox)
 
-Submit 路径**不再**在 HTTP 事务里直接 `syncSend`。
+Submit 路径**不在** HTTP 事务里直接 `syncSend`。
 
 1. `CreditApplySubmissionTxService`（`@Transactional`）同一本地事务：
    - insert `CreditAsyncTask`（PENDING）
@@ -48,10 +48,12 @@ Submit 路径**不再**在 HTTP 事务里直接 `syncSend`。
    - insert `tb_mq_outbox_event`（NEW，payload = `CreditApprovalTaskMessage` JSON）
 2. HTTP 返回 `taskId`（此时 task 可能仍为 PENDING）
 3. `MqOutboxPublisher`（每 1s 轮询）：
-   - CAS `NEW/FAILED` → `SENDING`
-   - `CreditApprovalTaskProducer.syncSend(destination, message, timeout)` — Producer 重试由 RocketMQ client 配置控制
+   - CAS `NEW/FAILED` 或**超时 SENDING**（`update_time` 超过 2 分钟）→ `SENDING`
+   - `CreditApprovalTaskProducer.syncSend(destination, message, timeout)`
    - 成功 → outbox `SENT`，task `MQ_SENT`，audit `MQ_SEND_SUCCESS`
-   - 失败 → outbox `FAILED` + 指数退避；超过上限 → task `MQ_SEND_FAILED`
+   - 失败 → outbox `FAILED` + 指数退避（5s / 30s / 2min / 5min）；超过 5 次 → task `MQ_SEND_FAILED`
+
+> **SENDING 超时恢复**：Publisher 在发送过程中宕机时，事件可能卡在 SENDING；扫描会重新捞起。重复投递仍可能发生，Consumer 幂等必须保留。
 
 > Polling Outbox 是当前实现；后续生产化可替换为 binlog/CDC Outbox 或 RocketMQ 事务消息。
 
@@ -100,11 +102,11 @@ Eligible statuses: `MQ_SEND_FAILED`, `FAILED`, `MQ_SENT`, `PENDING`.
 
 | Aspect | MQ mode | Direct mode |
 |--------|---------|-------------|
-| Trigger | `MqCreditApprovalTaskTrigger` | `DirectCreditApprovalTaskTrigger` |
+| Trigger | Outbox → `MqOutboxPublisher` | `DirectCreditApprovalTaskTrigger` |
 | Executor | RocketMQ consumer threads | `taskExecutor` (core 4, max 8, queue 200) |
-| Durability | Broker-persisted | In-process only |
-| Retry | RocketMQ reconsume + DLQ | Limited |
-| Submit RT | Higher (includes syncSend) | Lower |
+| Durability | Outbox + Broker-persisted | In-process only |
+| Retry | Outbox backoff + RocketMQ reconsume + DLQ | Limited |
+| Submit RT | Lower（HTTP 仅落库 + outbox，不阻塞 syncSend） | Lower |
 | Use case | Production / reliable async | Local dev / tests |
 
 See [performance.md](performance.md) for JMeter benchmarks.
@@ -123,20 +125,21 @@ See [performance.md](performance.md) for JMeter benchmarks.
 ## Reliability Patterns
 
 ### Send-side
-- `syncSend` with retry
-- Failed sends persisted as `MQ_SEND_FAILED` (not silent loss)
-- Admin redelivery API
+- MySQL Polling Outbox：task/workflow/outbox 同事务落库
+- `MqOutboxPublisher` 异步 `syncSend`；失败指数退避，超限 `MQ_SEND_FAILED`
+- SENDING 超时（2 分钟）自动恢复
+- Admin 重置 outbox 补发
 
 ### Consume-side
-- At-least-once delivery
+- At-least-once delivery（Outbox 不能消除重复投递）
 - Terminal task guard
 - Workflow lock + idempotency
 - 16 reconsume → DLQ → manual review
 
-### Not implemented
-- Transactional Outbox (DB insert + MQ send not atomic)
-- Scheduled auto-redelivery job
-- Automatic DLQ reprocessing (DLQ only marks manual review)
+### Future improvements
+- Scheduled auto-redelivery job for `MQ_SEND_FAILED`
+- Upgrade polling outbox to binlog/CDC for production scale
+- Automatic DLQ reprocessing (DLQ only marks manual review today)
 
 ## Why RocketMQ over RabbitMQ / Kafka
 

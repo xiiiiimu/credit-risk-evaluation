@@ -12,6 +12,10 @@ import javax.annotation.Resource;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
+/**
+ * HTTP 提交幂等：以 {@code tb_agent_idempotent_record(scope, idempotency_key)} 唯一约束为准。
+ * {@code tb_credit_async_task.idempotency_key} 仅为普通索引，不作为最终幂等依据。
+ */
 @Service
 public class IdempotencyService {
 
@@ -48,9 +52,12 @@ public class IdempotencyService {
         }
 
         AgentIdempotentRecord existing = findRecord(scope, key);
-        if (existing != null && existing.getResponseJson() != null) {
+        if (existing != null) {
             validateRequestHash(existing, requestHash);
-            return JSONUtil.toBean(existing.getResponseJson(), type);
+            T resolved = tryResolveCompleted(scope, key, requestHash, existing, type);
+            if (resolved != null) {
+                return resolved;
+            }
         }
 
         AgentIdempotentRecord record = existing;
@@ -66,18 +73,9 @@ public class IdempotencyService {
                 stringRedisTemplate.delete(redisKey);
                 return waitAndReadResponse(scope, key, requestHash, type);
             }
-        } else {
-            validateRequestHash(record, requestHash);
-            if (existing.getResponseJson() != null) {
-                return JSONUtil.toBean(existing.getResponseJson(), type);
-            }
-            if (IdempotencyStatus.PROCESSING.equals(existing.getStatus())) {
-                stringRedisTemplate.delete(redisKey);
-                return waitAndReadResponse(scope, key, requestHash, type);
-            }
-            record.setStatus(IdempotencyStatus.PROCESSING);
-            record.setErrorMsg(null);
-            idempotentRecordMapper.updateById(record);
+        } else if (IdempotencyStatus.PROCESSING.equals(record.getStatus())) {
+            stringRedisTemplate.delete(redisKey);
+            return waitAndReadResponse(scope, key, requestHash, type);
         }
 
         try {
@@ -102,17 +100,38 @@ public class IdempotencyService {
             AgentIdempotentRecord record = findRecord(scope, key);
             if (record != null) {
                 validateRequestHash(record, requestHash);
-                if (record.getResponseJson() != null) {
-                    return JSONUtil.toBean(record.getResponseJson(), type);
-                }
-                if (IdempotencyStatus.FAILED.equals(record.getStatus())) {
-                    throw new IdempotencyProcessingException(
-                            "same idempotency key failed previously, retry later or use a new key");
+                T resolved = tryResolveCompleted(scope, key, requestHash, record, type);
+                if (resolved != null) {
+                    return resolved;
                 }
             }
             sleepQuietly(WAIT_POLL_MS);
         }
         throw new IdempotencyProcessingException("same idempotency key is processing, retry later");
+    }
+
+    /**
+     * @return 已完成响应；PROCESSING 返回 null 以便继续等待；FAILED 抛异常
+     */
+    private <T> T tryResolveCompleted(
+            String scope,
+            String key,
+            String requestHash,
+            AgentIdempotentRecord record,
+            Class<T> type) {
+        if (record.getResponseJson() != null && !record.getResponseJson().trim().isEmpty()) {
+            return JSONUtil.toBean(record.getResponseJson(), type);
+        }
+        if (IdempotencyStatus.FAILED.equals(record.getStatus())) {
+            String message = record.getErrorMsg() != null && !record.getErrorMsg().trim().isEmpty()
+                    ? record.getErrorMsg()
+                    : IdempotencyFailedException.DEFAULT_MESSAGE;
+            throw new IdempotencyFailedException(message);
+        }
+        if (IdempotencyStatus.SUCCESS.equals(record.getStatus())) {
+            throw new IdempotencyProcessingException("same idempotency key is processing, retry later");
+        }
+        return null;
     }
 
     private AgentIdempotentRecord findRecord(String scope, String key) {

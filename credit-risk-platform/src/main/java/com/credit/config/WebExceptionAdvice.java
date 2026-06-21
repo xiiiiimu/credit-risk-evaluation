@@ -1,6 +1,7 @@
 package com.credit.config;
 
 import com.credit.agent.idempotent.IdempotencyConflictException;
+import com.credit.agent.idempotent.IdempotencyFailedException;
 import com.credit.agent.idempotent.IdempotencyProcessingException;
 import com.credit.common.Result;
 import lombok.extern.slf4j.Slf4j;
@@ -10,6 +11,11 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 @Slf4j
 @RestControllerAdvice
 public class WebExceptionAdvice {
+
+    @ExceptionHandler(IdempotencyFailedException.class)
+    public Result handleIdempotencyFailed(IdempotencyFailedException e) {
+        return Result.fail(e.getMessage());
+    }
 
     @ExceptionHandler(IdempotencyProcessingException.class)
     public Result handleIdempotencyProcessing(IdempotencyProcessingException e) {
