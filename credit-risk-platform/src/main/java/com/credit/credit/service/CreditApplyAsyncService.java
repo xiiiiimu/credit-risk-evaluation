@@ -1,18 +1,19 @@
 package com.credit.credit.service;
 
+import cn.hutool.crypto.digest.DigestUtil;
 import cn.hutool.json.JSONUtil;
 import com.credit.credit.dto.CreditApplySubmitRequest;
 import com.credit.credit.dto.UploadedDocumentDTO;
 import com.credit.credit.entity.CreditAsyncTask;
 import com.credit.credit.mapper.CreditAsyncTaskMapper;
 import com.credit.agent.idempotent.IdempotencyService;
+import com.credit.credit.mq.trigger.CreditApprovalTaskTrigger;
 import com.credit.input.dto.StructuredApplicationDTO;
 import com.credit.input.dto.UserNarrativeDTO;
 import com.credit.input.service.InputFusionService;
-import com.credit.credit.mq.trigger.CreditApprovalTaskTrigger;
-import com.credit.workflow.service.WorkflowPersistenceService;
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
@@ -26,7 +27,7 @@ import java.util.UUID;
 public class CreditApplyAsyncService {
 
     @Resource
-    private CreditApprovalTaskTrigger creditApprovalTaskTrigger;
+    private CreditApplySubmissionTxService creditApplySubmissionTxService;
     @Resource
     private CreditAsyncTaskMapper creditAsyncTaskMapper;
     @Resource
@@ -34,35 +35,35 @@ public class CreditApplyAsyncService {
     @Resource
     private IdempotencyService idempotencyService;
     @Resource
-    private WorkflowPersistenceService workflowPersistenceService;
-    @Resource
     private InputFusionService inputFusionService;
+
+    @Autowired(required = false)
+    private CreditApprovalTaskTrigger creditApprovalTaskTrigger;
+
+    @Value("${credit.mq.enabled:true}")
+    private boolean mqEnabled;
 
     public Long submitAsync(Long userId, CreditApplySubmitRequest request,
                             String sessionId, String traceId, String idempotencyKey) {
-        if (idempotencyKey != null && !idempotencyKey.trim().isEmpty()) {
-            CreditAsyncTask existing = creditAsyncTaskMapper.selectOne(
-                    new QueryWrapper<CreditAsyncTask>()
-                            .eq("idempotency_key", idempotencyKey.trim())
-                            .last("LIMIT 1"));
-            if (existing != null) {
-                return existing.getId();
-            }
-            Map<String, Object> cached = idempotencyService.execute(
-                    "credit.apply.submit",
-                    idempotencyKey,
-                    () -> {
-                        Long id = doSubmitAsync(userId, request, sessionId, traceId, idempotencyKey);
-                        Map<String, Object> m = new HashMap<>();
-                        m.put("taskId", id);
-                        return m;
-                    },
-                    Map.class);
-            if (cached != null && cached.get("taskId") != null) {
-                return Long.valueOf(cached.get("taskId").toString());
-            }
+        if (idempotencyKey == null || idempotencyKey.trim().isEmpty()) {
+            return doSubmitAsync(userId, request, sessionId, traceId, null);
         }
-        return doSubmitAsync(userId, request, sessionId, traceId, idempotencyKey);
+        String requestHash = buildRequestHash(userId, request);
+        Map<String, Object> cached = idempotencyService.execute(
+                "credit.apply.submit",
+                idempotencyKey,
+                requestHash,
+                () -> {
+                    Long id = doSubmitAsync(userId, request, sessionId, traceId, idempotencyKey.trim());
+                    Map<String, Object> payload = new HashMap<>();
+                    payload.put("taskId", id);
+                    return payload;
+                },
+                Map.class);
+        if (cached != null && cached.get("taskId") != null) {
+            return Long.valueOf(cached.get("taskId").toString());
+        }
+        throw new IllegalStateException("idempotent submit returned empty taskId");
     }
 
     private Long doSubmitAsync(Long userId, CreditApplySubmitRequest request,
@@ -111,27 +112,44 @@ public class CreditApplyAsyncService {
             task.setStatus(CreditAsyncTask.PENDING);
             workflowId = task.getWorkflowId();
 
-            long taskInsertStart = System.nanoTime();
-            creditAsyncTaskMapper.insert(task);
+            long txStart = System.nanoTime();
+            creditApplySubmissionTxService.createTaskWithWorkflowAndOutbox(task, traceId);
             taskId = task.getId();
-            log.info("[PERF][submit] taskId={} workflowId={} stage=taskInsert cost={}ms",
-                    taskId, workflowId, elapsedMs(taskInsertStart));
+            log.info("[PERF][submit] taskId={} workflowId={} stage=submissionTx cost={}ms",
+                    taskId, workflowId, elapsedMs(txStart));
 
-            long initWorkflowStart = System.nanoTime();
-            workflowPersistenceService.initWorkflowIfAbsent(
-                    task.getWorkflowId(), traceId, task.getId(), null);
-            log.info("[PERF][submit] taskId={} workflowId={} stage=initWorkflow cost={}ms",
-                    taskId, workflowId, elapsedMs(initWorkflowStart));
-
-            long triggerStart = System.nanoTime();
-            creditApprovalTaskTrigger.trigger(task);
-            log.info("[PERF][submit] taskId={} workflowId={} stage=trigger cost={}ms",
-                    taskId, workflowId, elapsedMs(triggerStart));
+            if (!mqEnabled && creditApprovalTaskTrigger != null) {
+                long triggerStart = System.nanoTime();
+                creditApprovalTaskTrigger.trigger(task);
+                log.info("[PERF][submit] taskId={} workflowId={} stage=directTrigger cost={}ms",
+                        taskId, workflowId, elapsedMs(triggerStart));
+            }
             return task.getId();
         } finally {
             log.info("[PERF][submit] taskId={} workflowId={} stage=doSubmitAsync.total cost={}ms",
                     taskId, workflowId, elapsedMs(totalStart));
         }
+    }
+
+    static String buildRequestHash(Long userId, CreditApplySubmitRequest request) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("userId", userId);
+        payload.put("productId", request.getProductId());
+        payload.put("applyAmount", request.getApplyAmount());
+        payload.put("applyTerm", request.getApplyTerm());
+        payload.put("purpose", request.getPurpose());
+        payload.put("content", request.getContent());
+        payload.put("loanPurpose", request.getLoanPurpose());
+        payload.put("incomeDescription", request.getIncomeDescription());
+        payload.put("occupationDescription", request.getOccupationDescription());
+        payload.put("additionalDescription", request.getAdditionalDescription());
+        payload.put("riskExplanation", request.getRiskExplanation());
+        payload.put("income", request.getIncome());
+        payload.put("occupation", request.getOccupation());
+        payload.put("age", request.getAge());
+        payload.put("contactInfo", request.getContactInfo());
+        payload.put("documents", request.getDocuments());
+        return DigestUtil.sha256Hex(JSONUtil.toJsonStr(payload));
     }
 
     private static long elapsedMs(long startNano) {

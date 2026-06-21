@@ -111,9 +111,31 @@ CREATE TABLE IF NOT EXISTS `tb_agent_idempotent_record` (
   `idempotency_key` varchar(128) NOT NULL,
   `request_hash` varchar(64) DEFAULT NULL,
   `response_json` text,
+  `status` varchar(32) NOT NULL DEFAULT 'SUCCESS' COMMENT 'PROCESSING/SUCCESS/FAILED',
+  `error_msg` varchar(512) DEFAULT NULL,
   `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_scope_key` (`scope`, `idempotency_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `tb_mq_outbox_event` (
+  `id` bigint(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+  `event_key` varchar(128) NOT NULL COMMENT '幂等事件键，例如 credit-approval:{taskId}',
+  `aggregate_type` varchar(64) NOT NULL COMMENT '例如 CREDIT_APPROVAL_TASK',
+  `aggregate_id` varchar(64) NOT NULL COMMENT 'taskId',
+  `event_type` varchar(64) NOT NULL COMMENT '例如 CREDIT_APPROVAL_TASK_CREATED',
+  `destination` varchar(255) NOT NULL COMMENT 'RocketMQ topic:tag destination',
+  `payload_json` text NOT NULL,
+  `status` varchar(32) NOT NULL COMMENT 'NEW/SENDING/SENT/FAILED',
+  `retry_count` int NOT NULL DEFAULT 0,
+  `next_retry_time` datetime DEFAULT NULL,
+  `last_error` text DEFAULT NULL,
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_event_key` (`event_key`),
+  KEY `idx_status_next_retry_time` (`status`, `next_retry_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `tb_credit_product` (

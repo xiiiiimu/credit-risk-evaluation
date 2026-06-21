@@ -7,13 +7,18 @@
 **Scope:** `credit.apply.submit`  
 **Key:** `Idempotency-Key` header or body field `idempotencyKey`
 
-Flow (`IdempotencyService`):
-1. Redis `SETNX idempotent:credit.apply.submit:{key}` (24h)
-2. If duplicate → read `tb_agent_idempotent_record.responseJson` → return cached `{taskId}`
-3. Else execute submit, persist response to DB
-4. Race: `DuplicateKeyException` → fallback read existing record
+Flow (`IdempotencyService` + `CreditApplyAsyncService.submitAsync()`):
 
-Implementation: `CreditApplyAsyncService.submitAsync()`
+1. **无 Idempotency-Key** → 直接走普通提交流程。
+2. **有 Idempotency-Key**：
+   - Redis `SETNX idempotent:credit.apply.submit:{key}`（TTL 24h）
+   - **抢锁成功** → 写入 `tb_agent_idempotent_record`（`status=PROCESSING`）→ 创建 task/workflow/outbox → 保存 `{taskId}` 到 `responseJson`（`status=SUCCESS`）
+   - **抢锁失败** → 只读 MySQL 幂等记录，返回相同 `taskId`；**不再执行 supplier**
+   - 若抢锁失败但 `responseJson` 尚未写入 → 每 100ms 轮询，最多 3s；超时抛出 `same idempotency key is processing, retry later`
+   - 同一 key 携带不同请求体（`request_hash` 不一致）→ 抛出 `IdempotencyConflictException`
+   - MySQL `(scope, idempotency_key)` 唯一索引 + `DuplicateKeyException` 兜底
+
+Implementation: `CreditApplyAsyncService.submitAsync()` — **不再**直接查 `tb_credit_async_task` 做幂等。
 
 ### Layer 2 — Workflow State
 
@@ -59,9 +64,9 @@ RocketMQ delivers at-least-once. Handling:
 ## Message Loss Handling
 
 ### Send-side loss
-- `syncSend` timeout + 2 retries
-- Failure → `MQ_SEND_FAILED` persisted
-- Admin: `POST /api/admin/credit/mq/redelivery/{taskId}`
+- **Transactional Outbox**（`tb_mq_outbox_event`）：task/workflow/outbox 同事务落库，MQ 由 `MqOutboxPublisher` 异步发送
+- Outbox 发送失败 → 指数退避重试（最多 5 次）→ `MQ_SEND_FAILED`
+- Admin: `POST /api/admin/credit/mq/redelivery/{taskId}` → 重置 outbox 为 `NEW`，由 publisher 统一补发
 
 ### Consume-side loss
 - Retryable exceptions → RocketMQ reconsume (max 16)

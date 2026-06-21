@@ -110,52 +110,47 @@ public class CacheClient {
     public <R, ID> R queryWithLogicalExpire(
             String keyprefix, ID id, Class<R> type, Function<ID,R> dbFallback, Long time, TimeUnit unit){
         String key = keyprefix + id;
-        //1. 从redis查询商铺缓存
         String json = stringRedisTemplate.opsForValue().get(key);
-        //2. 未命中缓存或空值缓存，直接查库并回填
+        // 空值缓存：写入 ""，避免不存在的数据反复穿透 DB
+        if (json != null && json.isEmpty()) {
+            return null;
+        }
         if (StrUtil.isBlank(json)) {
-            R r = dbFallback.apply(id);
-            if (r == null) {
+            R loaded = dbFallback.apply(id);
+            if (loaded == null) {
+                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
                 return null;
             }
-            this.setWithLogicalExpire(key, r, time, unit);
-            return r;
+            this.setWithLogicalExpire(key, loaded, time, unit);
+            return loaded;
         }
-        //3. 命中，需要先把 json 反序列化为逻辑过期对象
         RedisData redisData = JSONUtil.toBean(json, RedisData.class);
         R r = JSONUtil.toBean((JSONObject) redisData.getData(), type);
         LocalDateTime expireTime = redisData.getExpireTime();
-        //5.判断是否过期
         if(expireTime.isAfter(LocalDateTime.now())) {
-            //5.1未过期，直接返回店铺信息
             return r;
         }
 
-        //5.3过期，需要缓存重建
-        //6.缓存重建
-        //6.1 获取互斥锁
         String lockKey = LOCK_CACHE_REBUILD_KEY + id;
         boolean isLock = tryLock(lockKey);
-        //6.2判断是否获取成功
         if(isLock){
-            //6.3成功，开启独立线程，实现缓存重建
             CACHE_REBUILD_EXECUTOR.submit(()->{
                 try {
-                    //查询数据库
                     R r1 = dbFallback.apply(id);
-                    //写入redis
+                    if (r1 == null) {
+                        stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                        return;
+                    }
                     this.setWithLogicalExpire(key,r1,time,unit);
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 }finally{
-                    //释放锁
                     unlock(lockKey);
                 }
 
             });
 
         }
-        //6。4返回过期的商铺信息
         return r;
 
     }

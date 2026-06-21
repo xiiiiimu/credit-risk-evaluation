@@ -40,7 +40,14 @@ public class CreditCacheService {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    /**
+     * 产品信息主要来自产品列表，正常用户一般不会随机查不存在 productId；
+     * 若产品详情接口暴露给外部，参数校验 + 空值缓存可防止不存在产品反复穿透数据库。
+     */
     public CreditProduct getProduct(Long productId, Function<Long, CreditProduct> dbFallback) {
+        if (productId == null || productId <= 0) {
+            return null;
+        }
         return cacheClient.queryWithLogicalExpire(
                 KEY_PRODUCT, productId, CreditProduct.class, dbFallback, 30L, TimeUnit.MINUTES);
     }

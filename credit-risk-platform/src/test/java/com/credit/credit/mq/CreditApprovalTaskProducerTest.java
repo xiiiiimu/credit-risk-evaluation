@@ -8,17 +8,19 @@ import com.credit.credit.mq.producer.CreditApprovalTaskProducer;
 import org.apache.rocketmq.client.producer.SendResult;
 import org.apache.rocketmq.client.producer.SendStatus;
 import org.apache.rocketmq.spring.core.RocketMQTemplate;
+import org.springframework.messaging.Message;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -28,6 +30,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class CreditApprovalTaskProducerTest {
 
     @Mock
@@ -54,7 +57,6 @@ class CreditApprovalTaskProducerTest {
         task.setTraceId("trace-10");
         when(properties.destination()).thenReturn("credit-approval-task-topic:credit-apply");
         when(properties.getSendTimeoutMs()).thenReturn(3000);
-        when(properties.getProducerRetryTimes()).thenReturn(2);
     }
 
     @Test
@@ -62,7 +64,7 @@ class CreditApprovalTaskProducerTest {
         SendResult sendResult = new SendResult();
         sendResult.setSendStatus(SendStatus.SEND_OK);
         sendResult.setMsgId("msg-1");
-        doReturn(sendResult).when(rocketMQTemplate).syncSend(anyString(), any(), anyLong(), anyInt());
+        doReturn(sendResult).when(rocketMQTemplate).syncSend(anyString(), any(Message.class), anyLong());
 
         assertTrue(producer.send(task));
         verify(mqAuditService).record(
@@ -73,7 +75,7 @@ class CreditApprovalTaskProducerTest {
     @Test
     void send_failed() {
         doThrow(new RuntimeException("broker down"))
-                .when(rocketMQTemplate).syncSend(anyString(), any(), anyLong(), anyInt());
+                .when(rocketMQTemplate).syncSend(anyString(), any(Message.class), anyLong());
 
         assertFalse(producer.send(task));
         verify(mqAuditService).record(

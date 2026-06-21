@@ -30,9 +30,13 @@ credit-agent (FastAPI, :8090)
 
 ```
 User POST /api/credit/apply/submit
-  → CreditApplyAsyncService: idempotency check, create CreditAsyncTask (PENDING)
-  → initWorkflowIfAbsent → tb_workflow (INIT)
-  → CreditApprovalTaskProducer.syncSend → task MQ_SENT
+  → CreditApplyAsyncService: Idempotency-Key (Redis SETNX + MySQL responseJson)
+  → CreditApplySubmissionTxService @Transactional:
+       insert CreditAsyncTask (PENDING)
+       initWorkflowIfAbsent → tb_workflow (INIT)
+       insert tb_mq_outbox_event (NEW)
+  → HTTP 返回 taskId
+  → MqOutboxPublisher (polling) → CreditApprovalTaskProducer.syncSend → task MQ_SENT
   → CreditApprovalTaskConsumer.onMessage
   → CreditApplyAsyncProcessor: RUNNING, draft application, acquire lock
   → AgentRemoteClient → Python /v1/agents/credit/analyze
@@ -42,6 +46,8 @@ User POST /api/credit/apply/submit
   → Frontend polls GET /api/credit/apply/task/{taskId}
 ```
 
+> Polling Outbox 是当前实现，后续可替换为 binlog/CDC 或 RocketMQ 事务消息。
+
 ---
 
 ## Module Responsibilities (Java)
@@ -49,7 +55,9 @@ User POST /api/credit/apply/submit
 | Package / Component | Role |
 |---------------------|------|
 | `CreditApplyController` | HTTP submit, task poll, application detail |
-| `CreditApplyAsyncService` | Task creation, idempotency, MQ trigger |
+| `CreditApplyAsyncService` | Task creation, idempotency, submission orchestration |
+| `CreditApplySubmissionTxService` | Transactional task + workflow + outbox |
+| `MqOutboxPublisher` | Polling outbox → RocketMQ send |
 | `CreditApplyAsyncProcessor` | Consumer worker: Agent call + commit |
 | `CreditApprovalEngine` | Sole final approval authority |
 | `ToolInvokeService` + `ToolRegistry` | Internal tool gateway for Python |

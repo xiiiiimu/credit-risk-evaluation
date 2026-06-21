@@ -15,7 +15,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
         "com.credit.product.mapper",
         "com.credit.workflow.mapper",
         "com.credit.platformconfig.mapper",
-        "com.credit.audit.mapper"
+        "com.credit.audit.mapper",
+        "com.credit.credit.mq.outbox"
 })
 @EnableAsync
 @EnableScheduling

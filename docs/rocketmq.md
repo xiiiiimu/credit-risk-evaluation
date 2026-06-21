@@ -38,12 +38,24 @@ Consumer reloads full context from `tb_credit_async_task` in MySQL.
 
 **Rationale:** DB is source of truth; small messages avoid stale payload issues.
 
-## Producer Flow
+## Producer Flow (Transactional Outbox)
 
-`CreditApprovalTaskProducer.syncSend()`:
-1. Send with timeout + retry
-2. Success → task status `MQ_SENT`, audit `MQ_SEND_SUCCESS`
-3. Failure → task status `MQ_SEND_FAILED`, audit `MQ_SEND_FAILED`
+Submit 路径**不再**在 HTTP 事务里直接 `syncSend`。
+
+1. `CreditApplySubmissionTxService`（`@Transactional`）同一本地事务：
+   - insert `CreditAsyncTask`（PENDING）
+   - init workflow（INIT）
+   - insert `tb_mq_outbox_event`（NEW，payload = `CreditApprovalTaskMessage` JSON）
+2. HTTP 返回 `taskId`（此时 task 可能仍为 PENDING）
+3. `MqOutboxPublisher`（每 1s 轮询）：
+   - CAS `NEW/FAILED` → `SENDING`
+   - `CreditApprovalTaskProducer.syncSend(destination, message, timeout)` — Producer 重试由 RocketMQ client 配置控制
+   - 成功 → outbox `SENT`，task `MQ_SENT`，audit `MQ_SEND_SUCCESS`
+   - 失败 → outbox `FAILED` + 指数退避；超过上限 → task `MQ_SEND_FAILED`
+
+> Polling Outbox 是当前实现；后续生产化可替换为 binlog/CDC Outbox 或 RocketMQ 事务消息。
+
+Admin 补发：重置 outbox event 为 `NEW`，**不绕过 outbox 直接发 MQ**。
 
 ## Consumer Flow
 
